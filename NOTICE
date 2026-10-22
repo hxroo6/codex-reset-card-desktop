@@ -1,0 +1,12 @@
+Codex Reset Card Desktop is an independent Windows desktop companion for:
+https://github.com/loccen/codex-reset-card
+
+Tested upstream version: 0.2.0
+Inspected upstream commit: b29aa8d7ee09d48ebe2686368c441ba73f61d2e4
+
+The desktop UI, notifications and per-card postponement adapter are maintained
+separately from the original scheduler. The adapter follows that scheduler's
+state schema and Windows singleton protocol. Upstream copyright and MIT terms
+are retained in LICENSES/codex-reset-card.MIT.
+
+This project is not an official OpenAI product and is not affiliated with OpenAI.
