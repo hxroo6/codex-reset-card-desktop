@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import subprocess
 import sys
 import unittest
@@ -14,9 +15,9 @@ class NativeGuardTests(unittest.TestCase):
         name = "Local\\CodexResetCardPanel-Test-" + uuid.uuid4().hex
         child = "from schedule_control import named_guard\nimport sys\ntry:\n with named_guard(sys.argv[1], timeout=0.05): pass\nexcept RuntimeError:\n sys.exit(23)\n"
         with named_guard(name):
-            blocked = subprocess.run([sys.executable, "-c", child, name], capture_output=True, timeout=5,
+            blocked = subprocess.run([sys.executable, "-c", child, name], capture_output=True, timeout=5, cwd=Path(__file__).parent,
                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self.assertEqual(blocked.returncode, 23, blocked.stderr)
-        free = subprocess.run([sys.executable, "-c", child, name], capture_output=True, timeout=5,
+        free = subprocess.run([sys.executable, "-c", child, name], capture_output=True, timeout=5, cwd=Path(__file__).parent,
                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.assertEqual(free.returncode, 0, free.stderr)

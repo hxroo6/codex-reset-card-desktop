@@ -15,6 +15,8 @@ import tempfile
 import time
 
 from panel_logic import default_binary, parse_time, utcnow
+from app_config import MIN_EXPIRY_RESERVE_SECONDS
+from upstream_compatibility import inspect_upstream
 
 
 def _paths():
@@ -75,8 +77,8 @@ def postpone_document(state, cfg, fingerprint, expected_trigger, now=None):
         if other_trigger <= now + timedelta(seconds=30):
             raise ValueError("卡片即将执行或已进入执行窗口，不能推迟")
     new_trigger = trigger + timedelta(minutes=2)
-    if new_trigger > expiry - timedelta(minutes=1):
-        raise ValueError("不能再推迟：最迟只能到有效期前 1 分钟")
+    if new_trigger > expiry - timedelta(seconds=MIN_EXPIRY_RESERVE_SECONDS):
+        raise ValueError("不能再推迟：最迟只能到有效期前 2 分钟")
     updated = copy.deepcopy(state)
     for card in updated["cards"]:
         if card["fingerprint"] == target["fingerprint"]:
@@ -210,6 +212,7 @@ def _restart_and_confirm():
 
 def postpone_card(fingerprint, expected_trigger):
     """User-clicked action: stop, hold daemon mutex, edit one card, restart."""
+    _require_compatible()
     with named_guard("Local\\CodexResetCardPanel-Postpone", timeout=0.5):
         service = _cli("status", "--json").get("service", {})
         if service.get("installed") is not True or service.get("running") is not True:
@@ -222,6 +225,7 @@ def postpone_card(fingerprint, expected_trigger):
         try:
             _cli("service", "stop")
             with daemon_guard():
+                _require_compatible()
                 updated, result = postpone_document(_read(state_path), _read(cfg_path), fingerprint, expected_trigger)
                 atomic_write_state(state_path, updated)
                 committed = True
@@ -239,3 +243,9 @@ def postpone_card(fingerprint, expected_trigger):
         if failure is not None:
             raise RuntimeError(str(failure)) from failure
         return result
+
+
+def _require_compatible():
+    result = inspect_upstream(default_binary())
+    if not result["supported"]:
+        raise RuntimeError(result["message"])

@@ -91,20 +91,22 @@ class PostponeDocumentTests(unittest.TestCase):
         self.assertEqual(instant(changed["cards"][0]["nextAttemptAt"]), self.expected + timedelta(minutes=2))
 
     def test_repeated_postponement_uses_current_effective_time(self):
+        self.cfg["leadTimeSeconds"] = 420
+        self.expected = NOW + timedelta(minutes=8)
         first, first_result = self.postpone()
         second, result = self.postpone(state=first, expected=first_result["triggerAt"])
         self.assertEqual(instant(second["cards"][0]["nextAttemptAt"]), self.expected + timedelta(minutes=4))
         self.assertEqual(instant(result["triggerAt"]), self.expected + timedelta(minutes=4))
 
-    def test_exactly_one_minute_before_expiry_is_allowed(self):
-        current_effective = self.expected + timedelta(minutes=2)
+    def test_exactly_two_minutes_before_expiry_is_allowed(self):
+        current_effective = self.expected + timedelta(minutes=1)
         self.state["cards"][0]["nextAttemptAt"] = current_effective.isoformat()
         changed, _ = self.postpone(expected=current_effective.isoformat())
         expiry = instant(self.state["cards"][0]["expiresAt"])
-        self.assertEqual(instant(changed["cards"][0]["nextAttemptAt"]), expiry - timedelta(seconds=60))
+        self.assertEqual(instant(changed["cards"][0]["nextAttemptAt"]), expiry - timedelta(seconds=120))
 
     def test_one_microsecond_inside_expiry_reserve_is_rejected(self):
-        current_effective = self.expected + timedelta(minutes=2, microseconds=1)
+        current_effective = self.expected + timedelta(minutes=1, microseconds=1)
         self.state["cards"][0]["nextAttemptAt"] = current_effective.isoformat()
         with self.assertRaises(ValueError):
             self.postpone(expected=current_effective.isoformat())
@@ -329,7 +331,7 @@ class PostponeTransactionTests(unittest.TestCase):
             self.events.append("daemon-probe")
             return True
 
-        for name, value in (("named_guard", operation_guard), ("daemon_guard", daemon_guard),
+        for name, value in (("_require_compatible", lambda: None), ("named_guard", operation_guard), ("daemon_guard", daemon_guard),
                             ("_cli", cli), ("_read", read), ("atomic_write_state", write),
                             ("_paths", lambda: (self.state_path, self.cfg_path, Path("fixture.lock"))),
                             ("utcnow", lambda: NOW), ("_daemon_running", daemon_probe)):

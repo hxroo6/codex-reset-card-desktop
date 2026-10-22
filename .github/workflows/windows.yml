@@ -1,0 +1,39 @@
+name: Windows tests and standalone EXE
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Unit tests
+        working-directory: desktop
+        run: python -m unittest -v
+      - name: Demo UI smoke
+        working-directory: desktop
+        run: python reset_card_panel.py --smoke-test --smoke-report "${{ runner.temp }}\source-smoke.json"
+      - name: Build standalone EXE
+        run: |
+          python -m pip install -r requirements-build.txt
+          ./scripts/build-windows.ps1
+      - name: Standalone smoke without Python on PATH
+        shell: pwsh
+        run: |
+          $report = Join-Path '${{ runner.temp }}' 'exe-smoke.json'
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $process = Start-Process -FilePath './dist/CodexResetCardDesktop.exe' -ArgumentList @('--smoke-test','--smoke-report',('"'+$report+'"')) -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'Standalone EXE failed' }
+          $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if ($result.uiSmoke -ne 'passed' -or -not $result.runtimeBundled -or -not $result.tkLibraryBundled) { throw 'Bundled runtime verification failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodexResetCardDesktop-windows-x64
+          path: dist/CodexResetCardDesktop.exe

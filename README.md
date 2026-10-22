@@ -1,52 +1,85 @@
 # Codex Reset Card Desktop · Windows 桌面增强版
 
-为 [codex-reset-card](https://github.com/loccen/codex-reset-card) 提供中文桌面面板、卡片提醒和右下角倒计时。当前为预览版，已验证上游版本为 **0.2.0**。
+中文桌面面板、重置卡提醒和右下角倒计时。为 [codex-reset-card](https://github.com/loccen/codex-reset-card) 提供独立桌面增强功能，当前已验证的后台版本为 **0.2.0**。
 
-## 功能
+## 直接运行：不需要安装 Python
 
-- 卡片有效期、自动使用计划、倒计时、后台与授权状态。
-- 右下角悬浮窗，显示和置顶均可独立开关，设置自动保存。
-- 单卡每次推迟 2 分钟，最迟到期前 1 分钟；后台执行中或状态不明时禁止调整。
-- 到期提醒、使用结果与异常提醒；查询失败保留快照并标记陈旧。
-- 独立演示模式，不连接账号、不操作真实卡片。
+在 [Releases](https://github.com/hxroo6/codex-reset-card-desktop/releases/latest) 下载 Windows x64 ZIP，解压后双击 **CodexResetCardDesktop.exe**。EXE 包含 Python 与 Tcl/Tk 运行库。
 
-## 快速开始
-
-需要 Windows 10/11、Python 3.12+（包含 tkinter）、Node.js 20+，以及已经登录 ChatGPT 的 Codex CLI。
+**后台依赖仍需准备：**已经登录 ChatGPT 的 Codex CLI，以及 `codex-reset-card@0.2.0`。本面板不会替你登录，也不会自动授权消费卡片。
 
 ```powershell
 npm install -g codex-reset-card@0.2.0
 codexrc config set lead-time 5m
 codexrc service install
+```
+
+安装服务不等于授权。需要自动使用时，单独执行 `codexrc arm`；停用时执行 `codexrc disarm`。授权范围包含当前和以后后台发现的卡片。
+
+## 功能
+
+- 卡片有效期、实际自动使用计划、倒计时、后台与授权状态。
+- 右下角悬浮窗，显示与置顶独立开关，设置自动保存。
+- 单卡每次推迟 **2 分钟**，至少保留到期前 **2 分钟**。下一次会越界时禁用；例如默认提前 5 分钟，可推迟到提前 3 分钟，再次点击将被拒绝。
+- 成功、明确失败、此前已兑换和结果待确认分别提醒；重要结果需手动确认，不被普通提醒覆盖，未确认提醒可跨重启恢复。
+- 后台版本检查：无法确认兼容性时可以查看状态，但禁止修改延期计划。
+- 独立演示模式，不连接账号、不操作真实卡片。
+
+下图均为虚构演示数据：
+
+![桌面面板](docs/images/dashboard.png)
+
+![倒计时](docs/images/floating-countdown.png)
+![失败结果提醒](docs/images/result-notification.png)
+
+## 运行条件与边界
+
+- Windows 10/11 x64；电脑需开机、当前用户保持登录、网络与 Codex 登录有效。
+- 原后台默认每 24 小时发现新卡；面板每 5 分钟在线查看，不会因此更新后台发现计划。
+- 推迟按钮会短暂停止后台、持有同名互斥锁、核对并原子更新这一张卡的计划，再恢复并确认后台运行。它不执行立即兑换。
+- 距执行不超过 30 秒、已在使用/重试、可能影响其他正在处理的卡片或状态不明时，禁止延期。
+- 最小化主面板后继续提醒；关闭面板后提醒暂停，原调度服务继续运行。提醒是独立桌面浮窗，不是 Windows 通知中心 Toast。
+- 普通查询失败会退避；401/403/429 暂停自动在线查询，处理后可手动刷新。
+- 版本检查依据软件版本及状态 schema；当前只允许已验证的上游 **0.2.0** 执行延期。
+
+## 快捷方式与可选自启动
+
+解压的 EXE 文件夹或源码目录均可使用：
+
+```powershell
+# 只创建桌面快捷方式
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-shortcuts.ps1
+# 另加登录后最小化启动（由用户主动选择）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-shortcuts.ps1 -Startup
+# 移除本安装创建的入口
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-shortcuts.ps1 -Startup -Remove
+```
+
+脚本检测同名但不属于本安装的入口时会停止，避免覆盖其他程序。
+
+## 从源码运行与开发
+
+只有开发源码或打包时需要 Python 3.12+（包含 tkinter）；应用运行时只依赖标准库。双击启动器会寻找可用 Python，不再固定安装路径。
+
+```powershell
 python .\desktop\reset_card_panel.py
-```
-
-安装服务不会授权使用卡片。需要自动使用时，由你单独执行 `codexrc arm`；停用时执行 `codexrc disarm`。授权后会处理当前和未来发现的卡片。电脑需开机、用户保持登录、网络和登录有效。
-
-仅查看演示：
-
-```powershell
 python .\desktop\reset_card_panel.py --demo
-```
-
-## 当前边界
-
-- 仅支持 Windows；原后台默认每 24 小时发现新卡，面板每 5 分钟在线查看，不会因此更新后台发现计划。
-- 推迟按钮会短暂停止后台、持有同名互斥锁、核对并原子更新这一张卡的计划，再恢复后台。它不执行立即兑换。
-- 主面板最小化后仍提醒；关闭面板后提醒停止，原调度服务继续运行。
-- 当前源码快照的双击启动器使用固定 Python 路径；也可直接使用上面的 `python` 命令运行。通用启动与兼容检查将继续完善。
-- 不要提交本机日志、登录文件、卡片状态或真实截图。
-
-## 测试
-
-```powershell
 cd desktop
 python -m unittest -v
-python .\reset_card_panel.py --smoke-test
+python .\reset_card_panel.py --smoke-test --smoke-report ..\local\source-smoke.json
 ```
 
-测试使用模拟数据和临时目录。窗口冒烟在演示模式中验证显示、置顶、提醒和延期上限，不消费真实卡片。
+打包 EXE：
 
-## 许可证与来源
+```powershell
+python -m pip install -r requirements-build.txt
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
+```
 
-本仓库采用 MIT。上游项目版权与许可证见 [NOTICE](NOTICE) 和 [原项目 MIT 许可](LICENSES/codex-reset-card.MIT)。这是独立社区工具，与 OpenAI 无隶属关系。
+Windows GitHub Actions 会运行测试、演示窗口冒烟、构建 EXE，并移除 Python PATH 后验证独立 EXE 的内置运行库。
+
+## 数据与许可证
+
+本地设置、脱敏快照、提醒去重与未确认结果保存在 `%LOCALAPPDATA%\CodexResetCardPanel`。本面板不读取登录 token；在线请求由原 CLI 完成。不要公开提交本机日志、完整状态、登录文件或真实截图。
+
+采用 MIT；上游来源与版权见 [NOTICE](NOTICE)、[上游 MIT 许可证](LICENSES/codex-reset-card.MIT)。这是社区工具，与 OpenAI 无隶属关系。更多见 [SECURITY.md](SECURITY.md)。

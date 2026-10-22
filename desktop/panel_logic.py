@@ -62,7 +62,7 @@ def clean_status(value):
         raise ValueError("状态格式不是 JSON 对象")
     result = {k: copy.deepcopy(value[k]) for k in (
         "armed", "leadTimeSeconds", "cacheReady", "lastDiscoveryAt", "nextDiscoveryAt",
-        "availableCount", "detailsAvailable", "timingReady", "timingReadError") if k in value}
+        "availableCount", "detailsAvailable", "timingReady", "timingReadError", "upstreamVersion", "upstreamCompatible") if k in value}
     service = value.get("service")
     result["service"] = {k: service[k] for k in ("installed", "running", "manager") if k in service} if isinstance(service, dict) else {}
     cards = value.get("cards")
@@ -129,7 +129,13 @@ def read_status(refresh=False):
     if process.returncode:
         raise RuntimeError(safe_error(process.stderr.strip() or f"原工具退出码 {process.returncode}"))
     from schedule_control import add_schedule_timing
-    return clean_status(add_schedule_timing(clean_status(json.loads(process.stdout))))
+    from upstream_compatibility import inspect_upstream
+    status = add_schedule_timing(clean_status(json.loads(process.stdout)))
+    compatibility = inspect_upstream(binary)
+    status.update(upstreamVersion=compatibility["version"], upstreamCompatible=compatibility["supported"])
+    if not compatibility["supported"]:
+        status.update(timingReady=False, timingReadError=compatibility["message"])
+    return clean_status(status)
 
 
 def load_json(path, default):
@@ -255,13 +261,27 @@ class ReminderEngine:
         self.state["error"] = digest
         action = model.status.get("lastAction") or {}
         if action.get("kind") in ("consume", "verification"):
-            key = "action:" + json.dumps(action, sort_keys=True, ensure_ascii=False)
+            key = "result-v2:" + json.dumps(action, sort_keys=True, ensure_ascii=False)
             at = parse_time(action.get("at"))
             if key not in seen:
                 seen[key] = now.isoformat()
                 if at and timedelta(0) <= now - at <= timedelta(hours=24):
                     outcome = action.get("outcome") or action.get("message") or "结果未知"
-                    notes.append(("兑换结果" if action.get("kind") == "consume" else "兑换前检查", OUTCOMES.get(outcome, outcome)))
+                    stamp = clock_text(at)
+                    card = action.get("fingerprint", "未知卡片")
+                    if action.get("kind") == "verification":
+                        title = "使用前检查失败"
+                    elif outcome == "reset":
+                        title = "重置卡使用成功"
+                    elif outcome == "alreadyRedeemed":
+                        title = "重置卡此前已兑换"
+                    elif outcome == "noCredit":
+                        title = "重置卡使用失败"
+                    elif outcome == "nothingToReset":
+                        title = "当前无需重置"
+                    else:
+                        title = "使用结果待确认"
+                    notes.append((title, f"卡片 {card} · {stamp}\n" + OUTCOMES.get(outcome, outcome)))
         # Keep finite state, retaining 180 days of dedupe history.
         self.state["seen"] = {k: v for k, v in seen.items() if (parse_time(v) or now) >= now - timedelta(days=180)}
         return notes

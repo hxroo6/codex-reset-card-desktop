@@ -19,6 +19,7 @@ from panel_logic import (BEIJING, OUTCOMES, PanelModel, ReminderEngine, clock_te
                          demo_status, load_json, parse_time, read_status,
                          remaining_text, safe_error, save_json, utcnow)
 from floating_countdown import FloatingCountdown, automatic_use_view, work_area
+from app_config import MIN_EXPIRY_RESERVE_SECONDS
 
 BG = "#F0F5F8"
 NAVY = "#102C40"
@@ -31,8 +32,9 @@ RED = "#AC3544"
 
 
 class Panel:
-    def __init__(self, root, demo=False, smoke=False, minimized=False):
+    def __init__(self, root, demo=False, smoke=False, minimized=False, smoke_report=None):
         self.root, self.demo = root, demo
+        self.smoke_report = Path(smoke_report) if smoke_report else None
         self.root.title("Codex Reset Card · 到期与提醒" + (" [演示模式]" if demo else ""))
         self.root.geometry("1160x900")
         self.root.minsize(1000, 730)
@@ -56,6 +58,10 @@ class Panel:
         self.blocked = bool(self.session.get("autoBlocked", False))
         self.failures = int(self.session.get("failures", 0))
         self.last_notice = None
+        self.last_notice_persistent = False
+        self.notice_identity = None
+        self.pending_critical = [tuple(item) for item in self.session.get("pendingNotices", [])
+                                 if isinstance(item, list) and len(item) == 2 and all(isinstance(value, str) for value in item)][:20]
         self.history_entries = self.session.get("history", [])[-100:]
         self.sound = tk.BooleanVar(value=bool(self.settings.get("sound", True)))
         self.auto_live = tk.BooleanVar(value=bool(self.settings.get("autoLive", True)))
@@ -71,8 +77,13 @@ class Panel:
             self.demo_snapshot = self.model.status
             self.blocked = False
             self.add_history("演示模式", "全部数据为本地虚构，不连接账号，不消费真实卡。")
+            if smoke:
+                self.auto_live.set(False)
+                self.pending_critical = []
         self.render()
         self.root.after(100, self.tick)
+        if self.pending_critical:
+            self.root.after(350, lambda: self.show_notice(*self.pending_critical[0], persistent=True))
         if minimized:
             self.root.after(0, self.root.iconify)
         if smoke:
@@ -232,7 +243,7 @@ class Panel:
     def save_session(self):
         value = {"snapshot": self.model.saved(), "liveAttempt": self.live_attempt.isoformat() if self.live_attempt else None,
                  "nextLive": self.next_live.isoformat(), "autoBlocked": self.blocked, "failures": self.failures,
-                 "history": self.history_entries[-100:]}
+                 "history": self.history_entries[-100:], "pendingNotices": self.pending_critical}
         try:
             save_json(self.data_dir / "session.json", value)
             save_json(self.data_dir / "reminders.json", self.reminders.state)
@@ -296,8 +307,8 @@ class Panel:
                         raise RuntimeError("演示计划已变化，请刷新后再试")
                     delayed = trigger + timedelta(minutes=2)
                     expiry = parse_time(card["expiresAt"])
-                    if delayed > expiry - timedelta(minutes=1):
-                        raise RuntimeError("再推迟将超过有效期到期前 1 分钟")
+                    if delayed > expiry - timedelta(seconds=MIN_EXPIRY_RESERVE_SECONDS):
+                        raise RuntimeError("再推迟将超过有效期到期前 2 分钟")
                     card["nextAttemptAt"] = delayed.isoformat()
                     change = {"fingerprint": fingerprint, "triggerAt": delayed.isoformat(),
                               "expiresAt": expiry.isoformat(), "delayedSeconds": 120}
@@ -334,7 +345,7 @@ class Panel:
             # accept() retains the last online snapshot on a local-only refresh.
             self.model.accept(status)
             self.next_cache = time.monotonic() + 30
-            self.control_message = "已推迟 2 分钟 · 最迟到期前 1 分钟"
+            self.control_message = "已推迟 2 分钟 · 最迟到期前 2 分钟"
             self.add_history("自动使用已推迟", f"卡 {change['fingerprint']} 的新使用时间：{clock_text(change['triggerAt'])}；有效期到期：{clock_text(change['expiresAt'])}。")
         self.save_session()
         self.render()
@@ -458,7 +469,7 @@ class Panel:
         if not self.busy:
             self.refresh_button.configure(state="disabled" if left else "normal", text=f"在线刷新（{left}s）" if left else "在线只读刷新")
         live_note = "自动在线查询暂停" if self.blocked else "在线自动查询已关闭" if not self.auto_live.get() else f"下次在线查询 {clock_text(self.next_live)}"
-        self.footer.configure(text=f"提醒：到期前 24 小时 / 1 小时 / 10 分钟、兑换结果、服务异常。最小化后仍提醒，关闭面板后提醒停止，原服务继续运行。\n{live_note}  ·  悬浮窗每次可推迟 2 分钟，最迟到期前 1 分钟使用。")
+        self.footer.configure(text=f"提醒：到期前 24 小时 / 1 小时 / 10 分钟、使用结果、服务异常。最小化后仍提醒，关闭面板后提醒停止，原服务继续运行。\n{live_note}  ·  每次推迟 2 分钟，最迟到期前 2 分钟；重要结果需手动确认。")
         self.update_floating(now)
 
     def add_history(self, title, text):
@@ -474,23 +485,48 @@ class Panel:
         self.history.see("end")
         self.history.configure(state="disabled")
 
-    def show_notice(self, title, text):
+    def dismiss_notice(self):
+        identity = self.notice_identity
         if self.last_notice and self.last_notice.winfo_exists():
+            self.last_notice.destroy()
+        self.last_notice = None
+        self.last_notice_persistent = False
+        self.notice_identity = None
+        if identity in self.pending_critical:
+            self.pending_critical.remove(identity)
+            self.save_session()
+        if self.pending_critical:
+            self.show_notice(*self.pending_critical[0], persistent=True)
+
+    def show_notice(self, title, text, persistent=None):
+        if persistent is None:
+            persistent = any(word in title for word in ("使用成功", "使用失败", "待确认", "此前已兑换", "检查失败"))
+        if persistent and (title, text) not in self.pending_critical:
+            self.pending_critical.append((title, text))
+            self.pending_critical = self.pending_critical[-20:]
+            self.save_session()
+        if self.last_notice and self.last_notice.winfo_exists():
+            if self.last_notice_persistent:
+                return
             self.last_notice.destroy()
         note = tk.Toplevel(self.root)
         self.last_notice = note
+        self.last_notice_persistent = bool(persistent)
+        self.notice_identity = (title, text)
+        note.protocol("WM_DELETE_WINDOW", self.dismiss_notice)
         note.title("Reset Card 提醒")
         note.configure(bg=NAVY, padx=20, pady=18)
         note.attributes("-topmost", True)
         self.position_notice()
         tk.Label(note, text=title, bg=NAVY, fg="#65E2CD", font=("Microsoft YaHei UI", 13, "bold"), wraplength=400, justify="left").pack(anchor="w")
         tk.Label(note, text=text, bg=NAVY, fg=WHITE, font=("Microsoft YaHei UI", 10), wraplength=400, justify="left").pack(anchor="w", pady=12)
-        tk.Button(note, text="知道了", bg=TEAL, fg=WHITE, relief="flat", font=("Microsoft YaHei UI", 10), padx=15, command=note.destroy).pack(anchor="e")
-        note.after(20000, lambda: note.destroy() if note.winfo_exists() else None)
+        tk.Button(note, text="知道了", bg=TEAL, fg=WHITE, relief="flat", font=("Microsoft YaHei UI", 10), padx=15, command=self.dismiss_notice).pack(anchor="e")
+        if not persistent:
+            note.after(20000, lambda: self.dismiss_notice() if self.last_notice is note and note.winfo_exists() else None)
         if self.sound.get():
             try:
                 import winsound
-                winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+                winsound.PlaySound("SystemAsterisk" if persistent else "SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
             except (ImportError, RuntimeError):
                 pass
 
@@ -502,6 +538,10 @@ class Panel:
     def smoke_test(self):
         # Exercises actual Tk widget layout and notification lifecycle without CLI/network.
         assert self.demo, "UI smoke test must run in demo mode"
+        self.drain()
+        if self.busy:
+            self.root.after(100, self.smoke_test)
+            return
         assert len(self.tree.get_children()) == 3
         assert "3" in self.metrics["count"].cget("text")
         self.root.update_idletasks()
@@ -551,7 +591,7 @@ class Panel:
         assert parse_time(view["triggerAt"]) == expected, "延期未恰好增加 120 秒"
         assert self.model.live == self.smoke_live_before, "延期更改了在线快照"
         assert [item.get("nextAttemptAt") or item["triggerAt"] for item in self.demo_snapshot["cards"][1:]] == self.smoke_other_triggers, "延期影响了其他卡片"
-        if self.smoke_postpone_count < 2:
+        if self.smoke_postpone_count < 1:
             assert view["postponeEnabled"], "允许范围内延期按钮不可用"
             assert self.floating_window.postpone_button.cget("state") == "normal"
             self.floating_window.postpone_button.invoke()
@@ -560,8 +600,8 @@ class Panel:
             self.smoke_postpone_count += 1
             self.root.after(100, self.smoke_postpone)
             return
-        assert parse_time(view["triggerAt"]) == parse_time(view["expiresAt"]) - timedelta(minutes=1), "最晚计划未保留 1 分钟"
-        assert not view["postponeEnabled"], "越过到期前 1 分钟仍可延期"
+        assert parse_time(view["triggerAt"]) <= parse_time(view["expiresAt"]) - timedelta(seconds=MIN_EXPIRY_RESERVE_SECONDS), "计划未保留 2 分钟"
+        assert not view["postponeEnabled"], "下一次越过到期前 2 分钟仍可延期"
         assert self.floating_window.postpone_button.cget("state") == "disabled", "到达延期上限未禁用按钮"
         self.root.geometry("1000x730")
         self.root.after(200, self.smoke_small_window)
@@ -590,11 +630,31 @@ class Panel:
                   "notificationGeometry": self.last_notice.geometry(), "footerVisibleAtMinimumSize": True,
                   "floatingVisibleWhileMinimized": bool(corner.winfo_viewable()), "floatingTogglePersisted": True,
                   "topmostTogglePersisted": True, "notificationDoesNotOverlap": True,
-                  "expiryTimeVisible": True, "postponeClickAddsSeconds": 120, "postponeClicks": 2,
-                  "postponeLimitBeforeExpirySeconds": 60, "postponeLimitDisablesButton": True,
+                  "expiryTimeVisible": True, "postponeClickAddsSeconds": 120, "postponeClicks": 1,
+                  "postponeLimitBeforeExpirySeconds": MIN_EXPIRY_RESERVE_SECONDS, "postponeLimitDisablesButton": True,
                   "otherCardSchedulesPreserved": True, "liveSnapshotPreserved": True, "network": False}
+        frozen = bool(getattr(sys, "frozen", False))
+        bundle = Path(getattr(sys, "_MEIPASS", ".")).resolve()
+        tcl_library = Path(str(self.root.tk.call("info", "library"))).resolve()
+        result.update(frozen=frozen, runtimeBundled=frozen and any(bundle.glob("python3*.dll")),
+                      tkLibraryBundled=frozen and tcl_library.is_relative_to(bundle))
         self.last_notice.destroy()
-        print(json.dumps(result, ensure_ascii=False))
+        self.last_notice = None
+        self.show_notice("重置卡使用失败", "演示失败通知，不涉及真实卡片。", persistent=True)
+        self.root.update()
+        assert self.last_notice_persistent and self.pending_critical
+        assert load_json(self.data_dir / "session.json", {}).get("pendingNotices"), "重要提醒未保存，重启可能丢失"
+        important = self.last_notice
+        self.show_notice("普通到期提醒", "不应覆盖失败通知")
+        assert self.last_notice is important, "重要结果被普通提醒覆盖"
+        self.dismiss_notice()
+        assert not self.pending_critical
+        result.update(resultReminderNeedsAcknowledgement=True, importantReminderNotOverwritten=True)
+        if self.smoke_report:
+            self.smoke_report.parent.mkdir(parents=True, exist_ok=True)
+            self.smoke_report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        if sys.stdout is not None:
+            print(json.dumps(result, ensure_ascii=False))
         self.close()
 
     def close(self):
@@ -632,6 +692,7 @@ def main():
     parser.add_argument("--demo", action="store_true", help="使用隔离的本地虚构数据")
     parser.add_argument("--smoke-test", action="store_true", help="运行实际 Tk UI 冒烟测试并退出（隐含 --demo）")
     parser.add_argument("--minimized", action="store_true", help="以最小化状态启动，提醒仍可用")
+    parser.add_argument("--smoke-report", help="将演示窗口测试结果写入 JSON，适用于独立 EXE")
     args = parser.parse_args()
     demo = args.demo or args.smoke_test
     mutex = acquire_single_instance(demo)
@@ -646,11 +707,13 @@ def main():
             traceback.print_exception(exc_type, exc_value, exc_traceback)
             root.destroy()
         root.report_callback_exception = fail_smoke
-    Panel(root, demo=demo, smoke=args.smoke_test, minimized=args.minimized)
+    Panel(root, demo=demo, smoke=args.smoke_test, minimized=args.minimized, smoke_report=args.smoke_report)
     root.mainloop()
     if mutex:
         ctypes.WinDLL("kernel32").CloseHandle(ctypes.c_void_p(mutex))
     if smoke_errors:
+        if args.smoke_report:
+            Path(args.smoke_report).write_text(json.dumps({"uiSmoke": "failed", "error": str(smoke_errors[0])}, ensure_ascii=False), encoding="utf-8")
         raise RuntimeError("UI smoke test failed") from smoke_errors[0]
 
 

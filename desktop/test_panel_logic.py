@@ -119,10 +119,10 @@ class PanelLogicTests(unittest.TestCase):
         model.status["lastAction"] = {"at": NOW.isoformat(), "kind": "consume", "outcome": "nothingToReset"}
         engine = ReminderEngine()
         notes = engine.evaluate(model, NOW)
-        result = next(text for title, text in notes if title == "兑换结果")
+        result = next(text for title, text in notes if title == "当前无需重置")
         self.assertIn("无需重置", result)
         self.assertNotIn("成功", result)
-        self.assertFalse(any(title == "兑换结果" for title, _ in engine.evaluate(model, NOW)))
+        self.assertFalse(any(title == "当前无需重置" for title, _ in engine.evaluate(model, NOW)))
 
     def test_persist_and_disk_loaded_is_stale_until_checked(self):
         model = self.sample()
@@ -136,7 +136,7 @@ class PanelLogicTests(unittest.TestCase):
 
     def test_cli_only_issues_status_and_refresh_read_commands(self):
         result = subprocess.CompletedProcess([], 0, json.dumps(demo_status(NOW)), "")
-        with patch("panel_logic.default_binary", return_value=Path(__file__)), patch("panel_logic.subprocess.run", return_value=result) as run:
+        with patch("panel_logic.default_binary", return_value=Path(__file__)), patch("panel_logic.subprocess.run", return_value=result) as run, patch("upstream_compatibility.inspect_upstream", return_value={"version": "0.2.0", "supported": True}):
             read_status(False)
             self.assertEqual(run.call_args.args[0][1:], ["status", "--json"])
             read_status(True)

@@ -4,7 +4,7 @@
 
 ## 已实现
 
-- 悬浮窗显示自动使用时间和有效期到期时间（北京时间），提供“推迟 2 分钟再使用”按钮。每次从当前计划延后 2 分钟，只调整这张卡，最迟到有效期前 1 分钟。默认提前 5 分钟时，可依次延后到提前 3 分钟、提前 1 分钟，之后禁用。
+- 悬浮窗显示自动使用时间和有效期到期时间（北京时间），提供“推迟 2 分钟再使用”按钮。每次从当前计划延后 2 分钟，只调整这张卡，最迟到有效期前 2 分钟。默认提前 5 分钟时，可延后到提前 3 分钟；再延后 2 分钟会越界，因此禁用。
 - 临近执行的 30 秒、状态未确认、后台停止、已有执行/重试时不可推迟。操作期间禁止重复点击，结束后读回实际计划，失败时显示原因。操作期间需等后台恢复完成才能关闭面板。
 
 - 右下角自动使用倒计时悬浮窗，每秒更新。主面板勾选“倒计时悬浮窗”显示或隐藏，勾选“悬浮窗置顶”选择是否覆盖其他窗口；默认开启，两项设置独立保存，重启或登录启动后恢复。悬浮窗右上角 × 可关闭显示，双击其内容可打开主面板。
@@ -41,15 +41,15 @@
 双击 **演示.cmd**，或执行：
 
 ```powershell
-& 'C:\Program Files\Python312\python.exe' 'F:\重置卡\desktop\reset_card_panel.py' --demo
+python '.\desktop\reset_card_panel.py' --demo
 ```
 
 演示数据、设置和提醒去重记录保存在独立的 `...\CodexResetCardPanel\demo` 目录。演示模式不启动原 CLI、不联网、不消费真实卡。面板里的“提醒测试”按钮只发本地测试提示。
 
 ```powershell
-Set-Location 'F:\重置卡\desktop'
-& 'C:\Program Files\Python312\python.exe' -m unittest -v
-& 'C:\Program Files\Python312\python.exe' .\reset_card_panel.py --smoke-test
+Set-Location '.\desktop'
+python -m unittest -v
+python .\reset_card_panel.py --smoke-test
 ```
 
 `--smoke-test` 隐含演示模式，创建真实 Tk 窗口、三行卡片和测试提醒，验证后关闭并输出 JSON 测试结果。它不会验证实际卡片兑换或未来系统提醒投递。

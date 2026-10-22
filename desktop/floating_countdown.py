@@ -8,6 +8,7 @@ import os
 import tkinter as tk
 
 from panel_logic import clock_text, remaining_text, utcnow
+from app_config import MIN_EXPIRY_RESERVE_SECONDS
 
 
 def automatic_use_view(model, now=None):
@@ -62,8 +63,8 @@ def automatic_use_view(model, now=None):
         reason = "此卡已有执行结果，暂不可推迟"
     elif seconds <= 30:
         reason = "距离自动使用不足 30 秒，暂不可推迟"
-    elif card["trigger"] + timedelta(minutes=2) > card["expires"] - timedelta(minutes=1):
-        reason = "再推迟将超过到期前 1 分钟"
+    elif card["trigger"] + timedelta(minutes=2) > card["expires"] - timedelta(seconds=MIN_EXPIRY_RESERVE_SECONDS):
+        reason = "再推迟将超过到期前 2 分钟"
     else:
         reason = ""
     view.update(postponeEnabled=not reason, postponeReason=reason)
