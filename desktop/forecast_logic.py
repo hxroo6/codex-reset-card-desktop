@@ -52,9 +52,12 @@ class ForecastStore:
 
     def source_rows(self, now=None):
         now = now or utcnow()
-        defaults = {s.get("id"): s for s in self.data["sources"] if isinstance(s, dict) and s.get("id")}
-        if not defaults:
-            defaults = {s["id"]: s for s in SOURCES}
+        saved_sources = {s.get("id"): s for s in self.data["sources"] if isinstance(s, dict) and s.get("id")}
+        # An upgraded installation must show newly configured sites before the
+        # first fetch. Fictional demos remain isolated from the real source list.
+        demo = any(str(key).startswith("demo-") for key in saved_sources)
+        defaults = {} if demo else {s["id"]: s for s in SOURCES}
+        defaults.update(saved_sources)
         rows = []
         for key, source in defaults.items():
             events = [e for e in source.get("events", []) if isinstance(e, dict)]
@@ -69,12 +72,16 @@ class ForecastStore:
             site_event = ordered[0] if ordered else {}
             confidence = "medium" if site_event.get("confidence") in ("medium", "high") else "low"
             reset = parse_time(site_event.get("resetAt"))
+            confidence_reason = site_event.get("confidenceReason") or "社区网站转述，未直接核实官方原帖；相同原帖的镜像不增加可信度"
+            if source.get("sourceGroupReason"):
+                confidence_reason += "；采集链路：" + source["sourceGroupReason"]
             rows.append({"id": key, "sourceId": key, "name": source.get("name", key), "sourceName": source.get("name", key),
                          "url": source.get("url", ""), "requestUrl": source.get("requestUrl", ""), "lastSuccessAt": source.get("lastSuccessAt"),
                          "fetchedAt": source.get("fetchedAt"), "nextAttemptAt": source.get("nextAttemptAt"), "error": source.get("error", ""),
                          "stale": stale, "confidence": confidence, "confidenceLabel": CONFIDENCE_LABELS[confidence], "count": len(events),
                          "status": "读取失败·缓存陈旧" if source.get("error") else "尚未采集" if not source.get("lastSuccessAt") else "缓存陈旧" if stale else "已更新",
-                         "confidenceReason": site_event.get("confidenceReason") or "社区网站转述，未直接核实官方原帖；相同原帖的镜像不增加可信度",
+                         "confidenceReason": confidence_reason,
+                         "sourceGroup": source.get("sourceGroup"), "sourceGroupReason": source.get("sourceGroupReason", ""),
                          "events": copy.deepcopy(events), "resetAt": site_event.get("resetAt"), "timeKind": site_event.get("timeKind", "unknown"),
                          "timeText": reset.astimezone(BEIJING).strftime("%Y-%m-%d %H:%M:%S 北京时间") if reset else "时间待核实",
                          "timeReason": site_event.get("timeReason", ""), "title": site_event.get("title", ""),

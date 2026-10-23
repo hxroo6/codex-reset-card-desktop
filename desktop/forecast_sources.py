@@ -1,6 +1,6 @@
 """Read-only public reset announcements. No account or reset-card access.
 
-Each independent source is polled at most every 15 minutes. The sources are
+Each source endpoint is polled at most every 15 minutes. The sources are
 community trackers, often mirroring the same original post; neither agreement
 nor a site's own confidence label is evidence of independent verification.
 """
@@ -37,6 +37,18 @@ SOURCES = (
      "requestUrl": "https://whenreset.app/api/resets.json", "adapter": "whenreset"},
     {"id": "skill2web", "name": "Skill2Web", "url": "https://reset.skill2web.com/zh/codex/",
      "requestUrl": "https://reset.skill2web.com/zh/codex/", "adapter": "skill2web"},
+    {"id": "codexreset-dev", "name": "CodexReset.dev", "url": "https://codexreset.dev/",
+     "requestUrl": "https://codexreset.dev/api/status?lang=en", "adapter": "codexreset-dev",
+     "sourceGroup": "codex-resets", "sourceGroupReason": "部分记录转存 Codex Resets；历史归档不代表新增预告或独立验证"},
+    {"id": "tibo-watch", "name": "Tibo Watch", "url": "https://tibo.watch/",
+     "requestUrl": "https://tibo.watch/api/signals", "adapter": "tibo-watch",
+     "sourceGroup": "community-aggregate", "sourceGroupReason": "聚合 Codex Resets、When Next Reset 等公共记录；同一原帖不重复加分"},
+    {"id": "whennextreset", "name": "When Next Reset", "url": "https://whennextreset.com/",
+     "requestUrl": "https://whennextreset.com/feed.xml", "adapter": "whennextreset",
+     "sourceGroup": "codex-resets", "sourceGroupReason": "RSS 为 Codex Resets 历史转述；没有原帖链接时保持低可信度"},
+    {"id": "codex-reset-app", "name": "Codex Reset App", "url": "https://codex-reset.app/",
+     "requestUrl": "https://codex-reset.app/", "adapter": "codex-reset-app",
+     "sourceGroup": "codex-resets", "sourceGroupReason": "公开页面转述上游公告；主页推算时点不作为原文准确时间"},
 )
 
 
@@ -167,6 +179,7 @@ def _event(source, item, *, text="", published=None, status="unknown", event_kin
     event_id = str(item.get("id") or item.get("tweet_id") or hashlib.sha256((original + text).encode()).hexdigest()[:20])
     return {"id": event_id[:150], "title": clean_text(item.get("title"), 140) or ("重置卡发放活动" if event_kind == "grant" else "Codex 公开重置活动"),
             "sourceId": source["id"], "sourceName": source["name"], "url": source["url"], "originalUrl": original,
+            "sourceGroup": source.get("sourceGroup", source["id"]), "sourceGroupReason": source.get("sourceGroupReason", ""),
             "publishedAt": iso(parse_time(published)), "resetAt": timed.get("resetAt"), "timeKind": timed.get("timeKind", "unknown"),
             "timeReason": timed.get("timeReason", ""), "eventKind": event_kind, "status": status,
             "confidence": confidence, "confidenceReason": reason, "text": text, "context": clean_text(context, 600),
@@ -182,7 +195,52 @@ def _forecast(text):
 
 
 def _cancelled(text):
+    text = re.sub(r"\bnot\s+(?:(?:been|yet|being|be)\s+)*cancel(?:led|ed)?\b"
+                  r"|\b(?:isn['’]t|wasn['’]t|aren['’]t|weren['’]t)\s+cancel(?:led|ed)?\b"
+                  r"|(?:尚未|没有|不会|未|不)(?:被)?取消", "", text, flags=re.I)
     return bool(re.search(r"\bcancel(?:led|ed)?\b|取消|撤回", text, re.I))
+
+
+def _completed(text):
+    """Completion language takes precedence over quoted earlier plans."""
+    text = re.sub(r"\b(?:will|shall|to|be)\s+(?:(?:be|fully|all|soon|automatically)\s+)*(?:completed|delivered|propagated|done)\b"
+                  r"|\b(?:not(?:\s+yet)?|never)\s+(?:completed|delivered|done|propagated)\b", "", text, flags=re.I)
+    return bool(re.search(r"\b(?:completed|delivered|propagated|all landed|confirmed landed)\b"
+                          r"|^(?:it['’]s\s+|it is\s+|all\s+)?done(?: and dusted)?(?:[.!\s]|$)"
+                          r"|\bit(?:['’]s|\s+is)\s+done\b|\breset\s+(?:(?:is|now|all|already)\s+)*done\b"
+                          r"|\b(?:has|have|had)\s+(?:(?:already|now|just|been)\s+)*(?:reset|landed|credited)\b"
+                          r"|\b(?:was|were)\s+(?:already\s+)?(?:reset|delivered|completed)\b"
+                          r"|(?:已|已经)(?:全部|完成|成功)?(?:重置|发放|到账|完成)", text, re.I))
+
+
+def _public_status(text, declared="", *, historical=False, published=None, timing=None, now=None):
+    """A fresh feed does not turn an archive, model prediction or hint into a plan."""
+    declared = str(declared).lower()
+    if _cancelled(text) or declared in ("cancelled", "canceled", "withdrawn"):
+        return "cancelled"
+    if _completed(text) or declared in ("completed", "delivered", "confirmed"):
+        return "completed"
+    if historical or declared in ("recorded", "observed", "archive", "archived"):
+        return "recorded"
+    if declared in ("hint", "note", "summary", "credit", "unknown"):
+        return "unknown"
+    if not _forecast(text):
+        return "unknown"
+    now = now or utcnow()
+    timing = timing or event_timing(text, published)
+    stated = parse_time(timing.get("resetAt"))
+    posted = parse_time(published)
+    if stated and stated <= now:
+        return "recorded"
+    if not stated and posted and now - posted > timedelta(days=2):
+        # Re-publishing a feed containing an old "tomorrow/soon" quote must not
+        # make that quote a current forecast again.
+        return "recorded"
+    return "upcoming"
+
+
+def _history_timing():
+    return {"resetAt": None, "timeKind": "unknown", "timeReason": "历史或已完成活动记录；发布、观察及归档时间不是未来重置时间"}
 
 
 class _FeedScript(HTMLParser):
@@ -204,17 +262,116 @@ class _FeedScript(HTMLParser):
             self.parts.append(data)
 
 
-def parse_source(source, payload):
+class _ResetAppPage(HTMLParser):
+    """Read only visible event rows, never hero estimates, scripts or paging."""
+    _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self, page_url):
+        super().__init__(convert_charrefs=True)
+        self.page_url = page_url
+        self.stack = []
+        self.row = None
+        self.row_depth = None
+        self.rows = []
+        self.synced_at = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = set(attrs.get("class", "").split())
+        if tag not in self._VOID:
+            self.stack.append((tag, classes))
+        if tag == "article" and "event-row" in classes and self.row is None:
+            self.row = {"title": [], "text": [], "badge": [], "context": [], "links": []}
+            self.row_depth = len(self.stack)
+        if tag == "time":
+            if self.row is not None and "event-date" in classes:
+                self.row["published"] = attrs.get("datetime")
+            if any("reset-overview-footer" in frame[1] for frame in self.stack):
+                self.synced_at = attrs.get("datetime")
+        if self.row is not None and tag == "a":
+            url = safe_url(urllib.parse.urljoin(self.page_url, attrs.get("href", "")))
+            if url:
+                self.row["links"].append(url)
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self._VOID:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        index = next((i for i in range(len(self.stack) - 1, -1, -1) if self.stack[i][0] == tag), None)
+        if index is None:
+            return
+        if self.row is not None and self.row_depth is not None and index < self.row_depth and tag == "article":
+            if len(self.rows) < MAX_EVENTS_PER_SOURCE:
+                self.rows.append(self.row)
+            self.row = None
+            self.row_depth = None
+        del self.stack[index:]
+
+    def handle_data(self, data):
+        if self.row is None:
+            return
+        if any(tag in ("script", "style") for tag, _ in self.stack):
+            return
+        if any(tag == "h3" for tag, _ in self.stack):
+            self.row["title"].append(data)
+        elif any("badge" in classes for _, classes in self.stack):
+            self.row["badge"].append(data)
+        elif any(tag == "p" for tag, _ in self.stack):
+            self.row["text"].append(data)
+        elif any("calibration-label" in classes for _, classes in self.stack):
+            self.row["context"].append(data)
+
+
+def _parse_reset_app(source, payload, now):
+    parser = _ResetAppPage(source["url"])
+    parser.feed(payload)
+    if not parser.rows:
+        raise ValueError("公开页面缺少 event-row，采集格式可能已更改")
+    if not parse_time(parser.synced_at):
+        raise ValueError("公开页面缺少有效 Last synced，采集格式可能已更改")
+    events = []
+    for row in parser.rows:
+        title, text, badge, context = (clean_text(" ".join(row[key])) for key in ("title", "text", "badge", "context"))
+        if not title or not badge or not parse_time(row.get("published")):
+            raise ValueError("公开页面活动行字段发生变化")
+        if not _activity(title + " " + text):
+            continue
+        links = row["links"]
+        original = next((url for url in links if re.match(r"https://(?:www\.)?(?:x|twitter)\.com/[^/]+/status/\d+", url)), "")
+        detail = next((url for url in links if urllib.parse.urlsplit(url).hostname == "codex-reset.app"), "")
+        # This page supplies a tracker summary, not the quoted primary post.
+        # Even a numerical hero time may only be an upstream conversion.
+        timing = {"resetAt": None, "timeKind": "window", "timeReason": "公开页面为第三方摘要；主页推算时点未核实原帖，不生成准确倒计时"}
+        lower_badge = badge.lower()
+        declared = ("cancelled" if _cancelled(badge) else "completed" if "completion" in lower_badge or "completed" in lower_badge
+                    else "recorded" if "observation" in lower_badge else "planned" if "announced" in lower_badge else "unknown")
+        status = _public_status(text, declared, published=row.get("published"), timing=timing, now=now)
+        if status != "upcoming":
+            timing = _history_timing() if status in ("completed", "recorded") else dict(timing, timeKind="unknown")
+        event = _event(source, {"id": detail or original, "title": title}, text=text, published=row.get("published"),
+                       status=status, event_kind="forecast" if status == "upcoming" else "related", timing=timing,
+                       original=original or detail, context=" · ".join(value for value in (badge, context) if value))
+        event.update(confidence="low", confidenceReason="第三方页面摘要，未取得原帖正文；观察、自动发布及推算时点均不构成准确预告")
+        events.append(event)
+    return events, {"upstreamStale": False, "snapshotAt": iso(parse_time(parser.synced_at))}
+
+
+def parse_source(source, payload, now=None):
     """Adapt actual public endpoint schemas; malformed schemas fail visibly."""
     adapter = source["adapter"]
+    now = now or utcnow()
+    if adapter == "codex-reset-app":
+        return _parse_reset_app(source, payload, now)
     if adapter == "skill2web":
         parser = _FeedScript()
         parser.feed(payload)
         if not parser.parts:
             raise ValueError("页面缺少 public-feed-data，采集格式可能已更改")
         data = json.loads("".join(parser.parts))
-    elif adapter == "rss":
-        return parse_rss(source, payload)
+    elif adapter in ("rss", "whennextreset"):
+        return parse_rss(source, payload, now=now)
     else:
         data = json.loads(payload)
     if not isinstance(data, dict):
@@ -236,7 +393,7 @@ def parse_source(source, payload):
                 continue
             future = _forecast(text)
             status = "cancelled" if _cancelled(text) else "upcoming" if future else "recorded" if item.get("source") in ("archive", "observed", "operator-observed") else "unknown"
-            if status != "cancelled" and (item.get("observation_result") == "reset_observed" or item.get("banked_state") == "available"
+            if status != "cancelled" and (_completed(text) or item.get("observation_result") == "reset_observed" or item.get("banked_state") == "available"
                                            or item.get("reset_verification_status") in ("delivered", "confirmed", "verified")):
                 status = "completed"
             # announced_at and the feed's 'announcement / confirmation time'
@@ -264,7 +421,7 @@ def parse_source(source, payload):
             if estimate and stated and abs((estimate - stated).total_seconds()) > 60:
                 timing = {"resetAt": None, "timeKind": "window", "timeReason": "站点换算与原文时间不一致，暂不倒计时"}
             event = _event(source, item, text=text, published=item.get("announced_at"),
-                           status="cancelled" if item.get("status") == "cancelled" or _cancelled(text) else "upcoming" if scheduled else "recorded",
+                           status="cancelled" if item.get("status") in ("cancelled", "canceled", "withdrawn") or _cancelled(text) else "completed" if item.get("status") in ("completed", "delivered") or _completed(text) else "upcoming" if scheduled else "recorded",
                            event_kind="grant" if item.get("reset_type") == "banked" else "forecast" if scheduled else "reset", timing=timing, original=rawsource.get("url"))
             if rawsource.get("type") == "observed":
                 event.update(resetAt=None, timeKind="unknown", confidence="low", confidenceReason="站点监测账户的观察记录，不代表个人到账或未来活动时间")
@@ -286,7 +443,7 @@ def parse_source(source, payload):
             future = _forecast(text)
             completed = parse_time(item.get("delivered_at"))
             event = _event(source, item, text=text, published=item.get("ts"),
-                           status="cancelled" if _cancelled(text) else "completed" if completed else "upcoming" if future else "recorded",
+                           status="cancelled" if _cancelled(text) else "completed" if completed or _completed(text) else "upcoming" if future else "recorded",
                            event_kind="grant" if item.get("kind") == "banked" else "forecast" if future else "reset")
             if completed:
                 event.update(deliveredAt=iso(completed), deliveredSourceUrl=safe_url(item.get("delivered_source_url")))
@@ -306,6 +463,7 @@ def parse_source(source, payload):
             status = item.get("status") if item.get("status") in ("upcoming", "cancelled", "recorded", "completed", "delivered") else "unknown"
             if status == "delivered":
                 status = "completed"
+            status = "cancelled" if _cancelled(text) else "completed" if _completed(text) else status
             event = _event(source, item, text=text, published=item.get("at"), status=status,
                            event_kind="forecast" if status == "upcoming" else "related", context=parent.get("text", ""))
             if parse_time(item.get("estimatedResetText")):
@@ -313,16 +471,65 @@ def parse_source(source, payload):
                 event["claimedTimeText"] = parse_time(item["estimatedResetText"]).astimezone(BEIJING).strftime("站点推算：%Y-%m-%d %H:%M:%S 北京时间（未核实）")
             # corroboratedBy are mirrors, not independently checked evidence.
             events.append(event)
+    elif adapter == "codexreset-dev":
+        if not isinstance(data.get("events"), list) or not isinstance(data.get("status"), str):
+            raise ValueError("CodexReset.dev API 字段发生变化")
+        dependencies = [s for s in data.get("sources", []) if isinstance(s, dict) and s.get("id") == "codex-resets"] if isinstance(data.get("sources"), list) else []
+        meta.update(upstreamStale=not parse_time(data.get("resetArchiveSyncedAt")) or data.get("status") == "unknown" or any(s.get("status") != "online" for s in dependencies),
+                    snapshotAt=iso(parse_time(data.get("resetArchiveSyncedAt"))),
+                    contentUpdatedAt=iso(parse_time(data.get("generatedAt"))))
+        for item in data["events"][:MAX_EVENTS_PER_SOURCE]:
+            if not isinstance(item, dict) or item.get("type") not in ("global_reset", "banked_reset"):
+                continue
+            # effective_at/time_precision may describe an announcement or an
+            # account observation. Forecast probability is never a timestamp.
+            text = item.get("evidence_text") or ""
+            published = item.get("announced_at")
+            timing = event_timing(text, published)
+            status = _public_status(text, item.get("status", "unknown"), published=published, timing=timing, now=now)
+            observed = (item.get("time_basis") == "observation" or str(item.get("source_record_id", "")).startswith("observed-")
+                        or "observation" in str(item.get("source_author", "")).lower())
+            if observed:
+                status = "cancelled" if status == "cancelled" else "recorded"
+            if status in ("recorded", "completed"):
+                timing = _history_timing()
+            event = _event(source, item, text=text, published=published, status=status, timing=timing,
+                           event_kind="grant" if item.get("type") == "banked_reset" else "forecast" if status == "upcoming" else "reset",
+                           original=item.get("source_url"), context=item.get("notes") or item.get("summary") or "")
+            if observed:
+                event.update(confidence="low", confidenceReason="上游社区账户观察记录，未独立核实官方原帖；不代表个人到账或未来活动时间")
+            events.append(event)
+    elif adapter == "tibo-watch":
+        if data.get("schemaVersion") != 2 or not isinstance(data.get("events"), list):
+            raise ValueError("Tibo Watch API 字段发生变化")
+        meta.update(upstreamStale=data.get("stale") is True, snapshotAt=iso(parse_time(data.get("snapshotAt"))))
+        for item in data["events"][:MAX_EVENTS_PER_SOURCE]:
+            if not isinstance(item, dict) or item.get("kind") == "auxiliary" or item.get("stage") == "auxiliary":
+                continue
+            text = item.get("quote") or ""
+            if not item.get("contextReset") is True and not _activity(text):
+                continue
+            published = item.get("publishedAt")
+            timing = event_timing(text, published)
+            status = _public_status(text, item.get("stage", "unknown"), published=published, timing=timing, now=now)
+            if status in ("recorded", "completed"):
+                timing = _history_timing()
+            event = _event(source, item, text=text, published=published, status=status, timing=timing,
+                           event_kind="grant" if item.get("kind") == "credit" or item.get("stage") == "credit" else "forecast" if status == "upcoming" else "related",
+                           original=item.get("originalUrl") or item.get("sourceUrl"), context="聚合站转述原帖；分类和预测窗口不代表独立验证或个人到账")
+            events.append(event)
     else:
         raise ValueError("未支持的公开来源适配器")
     return events, meta
 
 
-def parse_rss(source, payload):
+def parse_rss(source, payload, now=None):
     """RSS/Atom adapter for future explicitly configured public feeds."""
     if "<!DOCTYPE" in payload.upper() or "<!ENTITY" in payload.upper():
         raise ValueError("不接受带实体声明的 Feed")
     root = ET.fromstring(payload)
+    if root.tag not in ("rss", "{http://www.w3.org/2005/Atom}feed"):
+        raise ValueError("来源返回的不是 RSS/Atom Feed")
     events = []
     entries = root.findall(".//item") or root.findall("{http://www.w3.org/2005/Atom}entry")
     for entry in entries[:MAX_EVENTS_PER_SOURCE]:
@@ -340,9 +547,14 @@ def parse_rss(source, payload):
                 published = iso(parsed) if parsed.tzinfo else None
             except (TypeError, ValueError, OverflowError):
                 published = None
+        historical = source.get("adapter") == "whennextreset"
+        timing = event_timing(text, published)
+        status = _public_status(text, historical=historical, published=published, timing=timing, now=now)
+        if historical or status in ("recorded", "completed"):
+            timing = _history_timing()
         events.append(_event(source, {"id": values.get("guid") or values.get("id"), "title": values.get("title"), "url": values.get("link")},
-                             text=text, published=published, status="cancelled" if _cancelled(text) else "upcoming" if _forecast(text) else "unknown",
-                             event_kind="forecast" if _forecast(text) else "related"))
+                             text=text, published=published, status=status, timing=timing,
+                             event_kind="grant" if re.search(r"credit|banked|卡片", text, re.I) else "forecast" if status == "upcoming" else "related"))
     return events, {"upstreamStale": False}
 
 
@@ -385,14 +597,14 @@ def _fetch(source):
 
 def _source_result(source, previous, now):
     old = copy.deepcopy(previous) if isinstance(previous, dict) else {}
-    result = {**old, **{k: source[k] for k in ("id", "name", "url", "requestUrl")}}
+    result = {**old, **{k: source[k] for k in ("id", "name", "url", "requestUrl", "sourceGroup", "sourceGroupReason") if k in source}}
     next_attempt = parse_time(old.get("nextAttemptAt"))
     if next_attempt and now < next_attempt:
         return result
     result["fetchedAt"] = iso(now)
     try:
         payload = _fetch(source)
-        events, meta = parse_source(source, payload)
+        events, meta = parse_source(source, payload, now=now)
         result.update(events=events, lastSuccessAt=iso(now), error="", failures=0, nextAttemptAt=iso(now + timedelta(seconds=POLL_SECONDS)), **meta)
     except Exception as error:
         # One failed source cannot delete its cached events or block the others.
@@ -431,8 +643,8 @@ def collect_forecasts(previous=None, now=None):
     previous = previous if isinstance(previous, dict) else {}
     old_sources = previous.get("sources", [])
     old_sources = {s.get("id"): s for s in old_sources if isinstance(s, dict)} if isinstance(old_sources, list) else {}
-    # Four independent workers bound normal latency to one source timeout rather
-    # than four sequential timeouts. Each endpoint has its own persistent budget.
+    # Four workers bound concurrent requests; only the first page of each fixed
+    # endpoint is read. Each endpoint has its own persistent polling budget.
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="public-forecast") as pool:
         futures = [pool.submit(_source_result, s, old_sources.get(s["id"]), now) for s in SOURCES]
         results = [future.result() for future in futures]

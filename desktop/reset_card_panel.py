@@ -23,7 +23,7 @@ from panel_logic import (BEIJING, OUTCOMES, PanelModel, ReminderEngine, clock_te
 from floating_countdown import FloatingCountdown, automatic_use_view, work_area
 from app_config import MIN_EXPIRY_RESERVE_SECONDS
 from forecast_logic import ForecastStore, demo_forecasts
-from forecast_sources import collect_forecasts
+from forecast_sources import SOURCES, collect_forecasts
 from forecast_widgets import ForecastSection, ForecastFloating
 
 BG = "#F0F5F8"
@@ -58,6 +58,9 @@ class Panel:
         self.forecast_store = ForecastStore(load_json(self.data_dir / "forecasts.json", {}))
         self.forecast_next = parse_time(self.session.get("forecastNext")) or utcnow()
         self.forecast_attempt = parse_time(self.session.get("forecastAttempt"))
+        cached_sites = {source.get("id") for source in self.forecast_store.saved().get("sources", []) if isinstance(source, dict)}
+        if not demo and {source["id"] for source in SOURCES} - cached_sites:
+            self.forecast_next = utcnow()
         self.busy = False
         self.postpone_busy = False
         self.control_message = ""
@@ -684,6 +687,10 @@ class Panel:
         self.toggle_forecasts()
         self.root.update()
         assert len(self.forecast_section.source_tree.get_children()) >= 3, "未分别显示多个预告来源"
+        self.forecast_section.render(ForecastStore())
+        assert len(self.forecast_section.source_tree.get_children()) == len(SOURCES), "新增配置来源未全部列出"
+        assert str(len(SOURCES)) + " 个公开来源" in self.forecast_section.summary.cget("text")
+        self.forecast_section.render(self.forecast_store)
         assert self.forecast_store.next_event(), "演示未来预告未进入倒计时"
         assert self.forecast_window.window.winfo_viewable(), "预告悬浮窗未显示"
         forecast_before = self.forecast_store
@@ -822,7 +829,7 @@ class Panel:
                       forecastCountdownVisibleWhileMinimized=True, forecastTogglePersisted=True,
                       forecastTopmostTogglePersisted=True, forecastCollectionTogglePersisted=True,
                       forecastWindowsDoNotOverlap=True, shortScreenNoticeDoesNotOverlap=True)
-        result.update(uncertainForecastVisibleWithoutCountdown=True)
+        result.update(uncertainForecastVisibleWithoutCountdown=True, configuredPublicSources=len(SOURCES))
         frozen = bool(getattr(sys, "frozen", False))
         bundle = Path(getattr(sys, "_MEIPASS", ".")).resolve()
         tcl_library = Path(str(self.root.tk.call("info", "library"))).resolve()

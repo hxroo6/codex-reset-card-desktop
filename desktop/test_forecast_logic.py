@@ -1,9 +1,11 @@
 import copy
 import json
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 from forecast_logic import ForecastStore, demo_forecasts
+from forecast_sources import SOURCES
 
 NOW = datetime(2026, 10, 23, 5, 30, tzinfo=timezone.utc)
 
@@ -22,11 +24,35 @@ class ForecastLogicTests(unittest.TestCase):
         self.assertTrue(store.next_event(NOW)["canCountdown"])
         self.assertEqual(len(store.rows(NOW)), 3)
 
-    def test_empty_store_shows_four_sites_but_no_fake_time(self):
+    def test_empty_store_shows_configured_sites_but_no_fake_time(self):
         store = ForecastStore()
-        self.assertEqual(len(store.source_rows(NOW)), 4)
+        self.assertEqual({row["id"] for row in store.source_rows(NOW)}, {source["id"] for source in SOURCES})
         self.assertIsNone(store.next_event(NOW))
         self.assertEqual(store.reminders(NOW), [])
+
+    def test_upgrade_adds_unfetched_site_without_losing_cache_or_reminder_history(self):
+        saved = fixture()
+        saved["sources"][0]["id"] = "existing-real-site"
+        saved["seen"] = {"old-reminder": NOW.isoformat()}
+        configured = [{"id": "existing-real-site", "name": "Existing", "url": "https://existing.invalid/"},
+                      {"id": "new-public-site", "name": "New", "url": "https://new.invalid/"}]
+        store = ForecastStore(saved)
+        with patch("forecast_logic.SOURCES", configured):
+            rows = {row["id"]: row for row in store.source_rows(NOW)}
+        self.assertEqual(set(rows), {"existing-real-site", "new-public-site"})
+        self.assertEqual(rows["existing-real-site"]["count"], 1)
+        self.assertIsNone(rows["new-public-site"]["lastSuccessAt"])
+        self.assertEqual(rows["new-public-site"]["count"], 0)
+        self.assertTrue(rows["new-public-site"]["stale"])
+        self.assertEqual(store.saved()["seen"], saved["seen"])
+        self.assertEqual(store.saved()["sources"], saved["sources"])
+
+    def test_site_dependency_is_disclosed_without_raising_confidence(self):
+        data = fixture()
+        data["sources"][0].update(sourceGroup="shared-upstream", sourceGroupReason="使用同一公告上游，不是独立证据")
+        row = ForecastStore(data).source_rows(NOW)[0]
+        self.assertIn("同一公告上游", row["confidenceReason"])
+        self.assertEqual(row["confidence"], "medium")
 
     def test_stale_after_two_hours_recomputed_after_sleep(self):
         store = ForecastStore(fixture(180))

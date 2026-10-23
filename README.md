@@ -29,7 +29,22 @@ codexrc service install
 
 ## 公开重置预告
 
-内置 [Codex Reset Radar](https://codex-reset.com/)、[Codex Resets](https://codex-resets.com/)、[WhenReset](https://whenreset.app/) 与 [Skill2Web](https://reset.skill2web.com/zh/codex/) 四个公开来源。默认每 15 分钟检查，单站异常退避并显示缓存状态，可关闭采集与提醒，也可单独关闭预告悬浮窗。
+内置 **8 个**公开公告与历史来源：
+
+| 来源 | 采集入口与用途 |
+| --- | --- |
+| [Codex Reset Radar](https://codex-reset.com/) | 公开公告 Feed |
+| [Codex Resets](https://codex-resets.com/) | 公共状态 API |
+| [WhenReset](https://whenreset.app/) | 公告与历史 JSON |
+| [Skill2Web](https://reset.skill2web.com/zh/codex/) | 中文公告页公开数据 |
+| [Codex Reset](https://codexreset.dev/) | 综合状态、原帖与历史 API |
+| [Codex Reset App](https://codex-reset.app/) | 公开网页预告与活动 |
+| [Tibo Watch](https://tibo.watch/) | 公告、预告与回复线索 API |
+| [When Next Reset](https://whennextreset.com/) | RSS 历史与发卡记录补充 |
+
+默认每 15 分钟检查，单站异常退避并显示缓存状态，可关闭采集与提醒，也可单独关闭预告悬浮窗。来源列表可滚动。升级后自动加入新增站点，保留原缓存和提醒去重记录。
+
+部分站点共用 Codex Resets 等上游，逐站详情会说明采集链路，不把转载数量当作独立证据。历史补充源没有明确预告时不会生成未来倒计时。
 
 在“公开重置预告”查看各站的证据可信度、原始公告、发布时间和预计重置时间。可信度为证据等级，**不是到账概率**；第三方转述未独立核验的原帖最高为中。多个站引用同一原帖仍是一份证据。
 

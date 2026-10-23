@@ -296,7 +296,7 @@ class ForecastSection:
         self._sync(self.event_tree, event_rows)
         ready = sum(1 for event in events if forecast_event_view(event, now)["canCountdown"])
         paused = "采集与提醒已关闭 · " if not self.enabled_var.get() else ""
-        self.summary.configure(text=paused + f"{len(sources)} 个公开来源 · {len(events)} 条相关内容 · {ready} 条有明确未来时间。发布时间与预告重置时间分别显示。")
+        self.summary.configure(text=paused + f"{len(sources)} 个公开来源 · {len(events)} 条相关内容 · {ready} 条有明确未来时间。来源列表可滚动；发布时间与预告时间分别显示。")
         self.refresh_button.configure(state="disabled" if busy else "normal", text="正在采集…" if busy else "采集公开预告")
         self._selected()
         self._source_selected()
