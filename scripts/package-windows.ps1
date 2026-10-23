@@ -8,7 +8,7 @@ $name = 'CodexResetCardDesktop-v' + $version + '-windows-x64'
 $stage = Join-Path (Join-Path $root 'dist') ('package-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage,(Join-Path $stage 'scripts'),(Join-Path $stage 'LICENSES') | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $stage 'docs\images') | Out-Null
-foreach ($image in @('dashboard.png','floating-countdown.png','result-notification.png')) {
+foreach ($image in @('dashboard.png','floating-countdown.png','result-notification.png','forecast-countdown.png','public-forecasts.png')) {
     Copy-Item -LiteralPath (Join-Path $root ('docs\images\' + $image)) -Destination (Join-Path $stage 'docs\images')
 }
 Copy-Item -LiteralPath $exe -Destination $stage

@@ -19,11 +19,19 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     root = tk.Tk()
     panel = Panel(root, demo=True)
+    panel.smoke = True  # Do not raise timed reminder popups during captures.
     panel.sound.set(False)
     panel.auto_live.set(False)
     panel.floating_enabled.set(True)
+    panel.forecast_floating_enabled.set(True)
     panel.toggle_floating()
     root.geometry("1160x900+30+30")
+    capture_errors = []
+
+    def failed(exc_type, exc_value, exc_traceback):
+        capture_errors.append(str(exc_value))
+        root.destroy()
+    root.report_callback_exception = failed
 
     def grab(widget, name):
         # Capture a fully mapped, opaque demo window only. Check that every sampled
@@ -31,6 +39,11 @@ def main():
         widget.attributes("-topmost", True)
         widget.lift()
         root.update()
+        if widget is not root:
+            # Changing topmost can recreate a native Tk wrapper. Move the mapped
+            # wrapper afterwards, inside the primary capture area.
+            widget.geometry(f"{widget.winfo_width()}x{widget.winfo_height()}+80+80")
+            root.update()
         time.sleep(0.6)
         root.update()
         user = ctypes.windll.user32
@@ -46,6 +59,7 @@ def main():
                     process = wintypes.DWORD()
                     user.GetWindowThreadProcessId(handle, ctypes.byref(process))
                     if process.value != os.getpid():
+                        print(f"Refused {name}: point=({x},{y}) owner={process.value} own={os.getpid()} geometry={widget.geometry()}", flush=True)
                         return False
             return True
         if not owned():
@@ -56,8 +70,16 @@ def main():
         picture.save(output / name)
 
     def capture():
+        panel.closed = True  # Freeze timers; all displayed data stays fictional.
         grab(root, "dashboard.png")
         grab(panel.floating_window.window, "floating-countdown.png")
+        panel.floating_window.window.withdraw()
+        grab(panel.forecast_window.window, "forecast-countdown.png")
+        panel.forecast_window.window.withdraw()
+        root.update_idletasks()
+        region = panel.canvas.bbox("all")
+        panel.canvas.yview_moveto(panel.forecast_section.frame.winfo_y() / max(1, region[3]))
+        grab(root, "public-forecasts.png")
         if panel.last_notice:
             panel.dismiss_notice()
         panel.show_notice("重置卡使用失败", "演示卡 DEMO-RESULT\n服务端提示卡片不可用。此为虚构提醒，不涉及真实账号。", persistent=True)
@@ -70,6 +92,8 @@ def main():
 
     root.after(1400, capture)
     root.mainloop()
+    if capture_errors:
+        raise RuntimeError(capture_errors[0])
 
 
 if __name__ == "__main__":

@@ -14,12 +14,17 @@ import time
 import tkinter as tk
 from tkinter import ttk
 from datetime import timedelta
+from urllib.parse import urlsplit
+import webbrowser
 
 from panel_logic import (BEIJING, OUTCOMES, PanelModel, ReminderEngine, clock_text,
                          demo_status, load_json, parse_time, read_status,
                          remaining_text, safe_error, save_json, utcnow)
 from floating_countdown import FloatingCountdown, automatic_use_view, work_area
 from app_config import MIN_EXPIRY_RESERVE_SECONDS
+from forecast_logic import ForecastStore, demo_forecasts
+from forecast_sources import collect_forecasts
+from forecast_widgets import ForecastSection, ForecastFloating
 
 BG = "#F0F5F8"
 NAVY = "#102C40"
@@ -34,6 +39,7 @@ RED = "#AC3544"
 class Panel:
     def __init__(self, root, demo=False, smoke=False, minimized=False, smoke_report=None):
         self.root, self.demo = root, demo
+        self.smoke = smoke
         self.smoke_report = Path(smoke_report) if smoke_report else None
         self.root.title("Codex Reset Card · 到期与提醒" + (" [演示模式]" if demo else ""))
         self.root.geometry("1160x900")
@@ -47,6 +53,11 @@ class Panel:
         self.reminders = ReminderEngine(load_json(self.data_dir / "reminders.json", {}))
         self.results = queue.Queue()
         self.control_results = queue.Queue()
+        self.forecast_results = queue.Queue()
+        self.forecast_busy = False
+        self.forecast_store = ForecastStore(load_json(self.data_dir / "forecasts.json", {}))
+        self.forecast_next = parse_time(self.session.get("forecastNext")) or utcnow()
+        self.forecast_attempt = parse_time(self.session.get("forecastAttempt"))
         self.busy = False
         self.postpone_busy = False
         self.control_message = ""
@@ -68,6 +79,12 @@ class Panel:
         self.floating_enabled = tk.BooleanVar(value=bool(self.settings.get("floatingCountdown", True)))
         self.floating_topmost = tk.BooleanVar(value=bool(self.settings.get("floatingTopmost", True)))
         self.floating_window = None
+        self.forecast_enabled = tk.BooleanVar(value=bool(self.settings.get("publicForecasts", True)))
+        self.forecast_floating_enabled = tk.BooleanVar(value=bool(self.settings.get("forecastFloating", True)))
+        self.forecast_topmost = tk.BooleanVar(value=bool(self.settings.get("forecastTopmost", True)))
+        self.forecast_window = None
+        if demo:
+            self.forecast_store.update(demo_forecasts())
         self.build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         if demo:
@@ -100,7 +117,7 @@ class Panel:
         header = tk.Frame(self.root, bg=NAVY, padx=28, pady=19)
         header.pack(fill="x")
         tk.Label(header, text="RESET CARD", bg=NAVY, fg="#58D7C4", font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        tk.Label(header, text="卡片到期，一眼掌握", bg=NAVY, fg=WHITE, font=("Microsoft YaHei UI", 23, "bold")).pack(anchor="w", pady=(2, 4))
+        tk.Label(header, text="卡片与重置预告，一眼掌握", bg=NAVY, fg=WHITE, font=("Microsoft YaHei UI", 23, "bold")).pack(anchor="w", pady=(2, 4))
         self.clock = tk.Label(header, bg=NAVY, fg="#B9D0DE", font=("Microsoft YaHei UI", 10))
         self.clock.pack(anchor="w")
         # Reserve the lifecycle notice before allocating the scrolling body.
@@ -181,6 +198,10 @@ class Panel:
         scroll.pack(side="right", fill="y")
         self.detail = tk.Label(body, text="", bg=BG, fg=MUTED, justify="left", anchor="w", font=("Microsoft YaHei UI", 9), wraplength=1060)
         self.detail.pack(fill="x", pady=(9, 8))
+        self.forecast_section = ForecastSection(
+            body, self.request_forecasts, self.toggle_forecasts, self.open_forecast_url,
+            self.forecast_enabled, self.forecast_floating_enabled, self.forecast_topmost)
+        self.forecast_section.frame.pack(fill="x", pady=(4, 12))
         lower = tk.Frame(body, bg=WHITE, padx=14, pady=10)
         lower.pack(fill="both", expand=True)
         tk.Label(lower, text="最近动作与提醒", bg=WHITE, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
@@ -193,7 +214,9 @@ class Panel:
 
     def save_settings(self):
         self.settings.update(sound=self.sound.get(), autoLive=self.auto_live.get(),
-                             floatingCountdown=self.floating_enabled.get(), floatingTopmost=self.floating_topmost.get())
+                             floatingCountdown=self.floating_enabled.get(), floatingTopmost=self.floating_topmost.get(),
+                             publicForecasts=self.forecast_enabled.get(), forecastFloating=self.forecast_floating_enabled.get(),
+                             forecastTopmost=self.forecast_topmost.get())
         try:
             save_json(self.data_dir / "settings.json", self.settings)
         except OSError as exc:
@@ -228,22 +251,120 @@ class Panel:
         elif self.floating_window is not None:
             self.floating_window.close()
             self.floating_window = None
+        self.update_forecast_floating(now)
         self.position_notice()
+
+    def toggle_forecasts(self):
+        self.save_settings()
+        self.render()
+
+    def hide_forecast_floating(self):
+        self.forecast_floating_enabled.set(False)
+        self.toggle_forecasts()
+
+    def update_forecast_floating(self, now=None):
+        if self.forecast_floating_enabled.get():
+            if self.forecast_window is None:
+                self.forecast_window = ForecastFloating(
+                    self.root, self.hide_forecast_floating, self.open_main_panel, self.forecast_topmost.get())
+            self.forecast_window.set_topmost(self.forecast_topmost.get())
+            event = self.forecast_store.next_event(now) if self.forecast_enabled.get() else None
+            self.forecast_window.render(event, now, paused=not self.forecast_enabled.get())
+            self.forecast_window.position(FloatingCountdown.HEIGHT + 12 if self.floating_window else 0)
+        elif self.forecast_window is not None:
+            self.forecast_window.close()
+            self.forecast_window = None
+
+    def open_forecast_url(self, value):
+        # Remote titles and links are untrusted data. Opening needs a user click.
+        try:
+            parsed = urlsplit(value)
+            valid = (parsed.scheme == "https" and parsed.hostname and not parsed.username
+                     and not parsed.password and not any(char.isspace() for char in value)
+                     and len(value) <= 2048)
+        except (ValueError, TypeError):
+            valid = False
+        if valid:
+            webbrowser.open(value)
+        else:
+            self.add_history("预告链接不可用", "只支持有效的公开 HTTPS 链接。")
+
+    def save_forecasts(self):
+        try:
+            save_json(self.data_dir / "forecasts.json", self.forecast_store.saved())
+        except OSError as exc:
+            self.add_history("预告保存失败", safe_error(exc))
+
+    def request_forecasts(self):
+        if self.forecast_busy:
+            return
+        now = utcnow()
+        if self.forecast_attempt and (now - self.forecast_attempt).total_seconds() < 60:
+            return
+        self.forecast_busy = True
+        self.forecast_attempt = now
+        self.forecast_next = now + timedelta(minutes=15)
+        self.save_session()
+        previous = self.forecast_store.saved()
+
+        def worker():
+            try:
+                result = demo_forecasts() if self.demo else collect_forecasts(previous)
+                self.forecast_results.put((result, None))
+            except Exception as exc:
+                self.forecast_results.put((None, safe_error(exc)))
+        threading.Thread(target=worker, daemon=True).start()
+        self.forecast_section.render(self.forecast_store, now, busy=True)
+
+    def drain_forecasts(self):
+        try:
+            result, error = self.forecast_results.get_nowait()
+        except queue.Empty:
+            return
+        self.forecast_busy = False
+        if error:
+            self.add_history("公开预告采集失败", error)
+        else:
+            self.forecast_store.update(result)
+            self.save_forecasts()
+        self.render()
+
+    def evaluate_forecast_reminders(self):
+        if self.smoke or not self.forecast_enabled.get():
+            return
+        notes = self.forecast_store.reminders()
+        if notes:
+            self.save_forecasts()
+            for title, text in notes:
+                self.add_history(title, text)
+            # Public forecasts must never block an important card-use result.
+            self.show_notice(notes[0][0], "\n".join(text for _, text in notes), persistent=False)
 
     def position_notice(self):
         if self.last_notice and self.last_notice.winfo_exists():
             left, top, right, bottom = work_area(self.root)
+            desktop_bottom = bottom
             width, height, margin = 440, 225, 16
             if self.floating_window is not None:
                 # The reminder has a native title bar; the countdown is borderless.
                 bottom -= FloatingCountdown.HEIGHT + 52
-            x, y = max(left, right - width - margin), max(top, bottom - height - margin)
+            if self.forecast_window is not None:
+                bottom -= ForecastFloating.HEIGHT + 12
+            x, y = right - width - margin, bottom - height - margin
+            if y < top + 32 and (self.floating_window or self.forecast_window):
+                # On short screens put the notice beside the countdown column.
+                column_width = max(FloatingCountdown.WIDTH if self.floating_window else 0,
+                                   ForecastFloating.WIDTH if self.forecast_window else 0)
+                x, y = right - column_width - width - margin - 12, desktop_bottom - height - margin
+            x, y = max(left, x), max(top + 32, y)
             self.last_notice.geometry(f"{width}x{height}+{x}+{y}")
 
     def save_session(self):
         value = {"snapshot": self.model.saved(), "liveAttempt": self.live_attempt.isoformat() if self.live_attempt else None,
                  "nextLive": self.next_live.isoformat(), "autoBlocked": self.blocked, "failures": self.failures,
                  "history": self.history_entries[-100:], "pendingNotices": self.pending_critical}
+        value.update(forecastNext=self.forecast_next.isoformat(),
+                     forecastAttempt=self.forecast_attempt.isoformat() if self.forecast_attempt else None)
         try:
             save_json(self.data_dir / "session.json", value)
             save_json(self.data_dir / "reminders.json", self.reminders.state)
@@ -392,20 +513,24 @@ class Panel:
             return
         self.drain()
         self.drain_controls()
+        self.drain_forecasts()
         now = utcnow()
+        if self.forecast_enabled.get() and not self.forecast_busy and now >= self.forecast_next:
+            self.request_forecasts()
         if not self.busy and not self.postpone_busy:
             if self.auto_live.get() and not self.blocked and now >= self.next_live:
                 self.request(True)
             elif time.monotonic() >= self.next_cache:
                 self.request(False)
         self.evaluate_reminders()
+        self.evaluate_forecast_reminders()
         self.render()
         self.root.after(1000, self.tick)
 
     def render(self):
         now = utcnow()
         status = self.model.status
-        self.clock.configure(text="北京时间  " + clock_text(now) + "    ·    本地缓存每 30 秒读取，在线查询每 5 分钟")
+        self.clock.configure(text="北京时间  " + clock_text(now) + "    ·    卡片缓存 30 秒 / 在线查询 5 分钟 / 公开预告 15 分钟")
         armed = status.get("armed")
         self.metrics["auth"].configure(text="已授权" if armed is True else "未授权" if armed is False else "未知", fg=TEAL if armed is True else ORANGE)
         service = status.get("service", {})
@@ -470,6 +595,7 @@ class Panel:
             self.refresh_button.configure(state="disabled" if left else "normal", text=f"在线刷新（{left}s）" if left else "在线只读刷新")
         live_note = "自动在线查询暂停" if self.blocked else "在线自动查询已关闭" if not self.auto_live.get() else f"下次在线查询 {clock_text(self.next_live)}"
         self.footer.configure(text=f"提醒：到期前 24 小时 / 1 小时 / 10 分钟、使用结果、服务异常。最小化后仍提醒，关闭面板后提醒停止，原服务继续运行。\n{live_note}  ·  每次推迟 2 分钟，最迟到期前 2 分钟；重要结果需手动确认。")
+        self.forecast_section.render(self.forecast_store, now, busy=self.forecast_busy)
         self.update_floating(now)
 
     def add_history(self, title, text):
@@ -547,6 +673,27 @@ class Panel:
         self.root.update_idletasks()
         assert self.footer.winfo_ismapped(), "默认尺寸下生命周期说明不可见"
         assert self.footer.winfo_rooty() + self.footer.winfo_height() <= self.root.winfo_rooty() + self.root.winfo_height()
+        self.forecast_enabled.set(True)
+        self.forecast_floating_enabled.set(True)
+        self.forecast_topmost.set(True)
+        self.toggle_forecasts()
+        self.root.update()
+        assert len(self.forecast_section.source_tree.get_children()) >= 3, "未分别显示多个预告来源"
+        assert self.forecast_store.next_event(), "演示未来预告未进入倒计时"
+        assert self.forecast_window.window.winfo_viewable(), "预告悬浮窗未显示"
+        assert self.forecast_window.window.attributes("-topmost"), "预告悬浮窗置顶未生效"
+        self.forecast_section.topmost_switch.invoke()
+        assert not self.forecast_window.window.attributes("-topmost"), "预告取消置顶未生效"
+        assert load_json(self.data_dir / "settings.json", {}).get("forecastTopmost") is False
+        self.forecast_section.topmost_switch.invoke()
+        self.forecast_section.floating_switch.invoke()
+        assert self.forecast_window is None
+        assert load_json(self.data_dir / "settings.json", {}).get("forecastFloating") is False
+        self.forecast_section.floating_switch.invoke()
+        self.forecast_section.enabled_switch.invoke()
+        assert "已关闭" in self.forecast_window.status.cget("text")
+        assert load_json(self.data_dir / "settings.json", {}).get("publicForecasts") is False
+        self.forecast_section.enabled_switch.invoke()
         self.floating_enabled.set(True)
         self.floating_topmost.set(True)
         self.toggle_floating()
@@ -623,8 +770,29 @@ class Panel:
         assert self.root.state() == "iconic", self.root.state()
         assert self.last_notice.winfo_viewable(), "提醒弹窗在最小化后不可见"
         assert self.floating_window.window.winfo_viewable(), "主窗口最小化后倒计时不可见"
+        assert self.forecast_window.window.winfo_viewable(), "主窗口最小化后预告倒计时不可见"
         corner = self.floating_window.window
-        assert self.last_notice.winfo_rooty() + self.last_notice.winfo_height() <= corner.winfo_rooty(), "提醒与悬浮窗重叠"
+        def overlap(first, second):
+            return (first.winfo_rootx() < second.winfo_rootx() + second.winfo_width()
+                    and second.winfo_rootx() < first.winfo_rootx() + first.winfo_width()
+                    and first.winfo_rooty() < second.winfo_rooty() + second.winfo_height()
+                    and second.winfo_rooty() < first.winfo_rooty() + first.winfo_height())
+        assert not overlap(self.last_notice, corner), "提醒与悬浮窗重叠"
+        forecast_corner = self.forecast_window.window
+        assert forecast_corner.winfo_rooty() + forecast_corner.winfo_height() <= corner.winfo_rooty(), "两个倒计时悬浮窗重叠"
+        assert not overlap(self.last_notice, forecast_corner), "提醒与预告倒计时重叠"
+        from unittest.mock import patch
+        area = work_area(self.root)
+        short_area = (area[0], area[1], max(area[2], area[0] + 1000), area[1] + 680)
+        with patch.object(sys.modules[__name__], "work_area", return_value=short_area), \
+                patch("forecast_widgets.work_area", return_value=short_area), \
+                patch("floating_countdown.work_area", return_value=short_area):
+            self.update_floating()
+            self.root.update()
+            assert not overlap(self.last_notice, corner), "短屏提醒遮挡卡片浮窗"
+            assert not overlap(self.last_notice, forecast_corner), "短屏提醒遮挡预告浮窗"
+        self.update_floating()
+        self.root.update()
         result = {"uiSmoke": "passed", "rows": 3, "notification": "created_and_closed",
                   "minimizedRoot": self.root.state(), "minimizedNotificationVisible": bool(self.last_notice.winfo_viewable()),
                   "notificationGeometry": self.last_notice.geometry(), "footerVisibleAtMinimumSize": True,
@@ -633,6 +801,10 @@ class Panel:
                   "expiryTimeVisible": True, "postponeClickAddsSeconds": 120, "postponeClicks": 1,
                   "postponeLimitBeforeExpirySeconds": MIN_EXPIRY_RESERVE_SECONDS, "postponeLimitDisablesButton": True,
                   "otherCardSchedulesPreserved": True, "liveSnapshotPreserved": True, "network": False}
+        result.update(publicForecastSources=len(self.forecast_section.source_tree.get_children()),
+                      forecastCountdownVisibleWhileMinimized=True, forecastTogglePersisted=True,
+                      forecastTopmostTogglePersisted=True, forecastCollectionTogglePersisted=True,
+                      forecastWindowsDoNotOverlap=True, shortScreenNoticeDoesNotOverlap=True)
         frozen = bool(getattr(sys, "frozen", False))
         bundle = Path(getattr(sys, "_MEIPASS", ".")).resolve()
         tcl_library = Path(str(self.root.tk.call("info", "library"))).resolve()
@@ -640,8 +812,11 @@ class Panel:
                       tkLibraryBundled=frozen and tcl_library.is_relative_to(bundle))
         self.last_notice.destroy()
         self.last_notice = None
+        self.show_notice("公开重置活动预告", "演示活动提醒。", persistent=False)
+        public_notice = self.last_notice
         self.show_notice("重置卡使用失败", "演示失败通知，不涉及真实卡片。", persistent=True)
         self.root.update()
+        assert not public_notice.winfo_exists(), "公开预告阻止了重要使用失败提醒"
         assert self.last_notice_persistent and self.pending_critical
         assert load_json(self.data_dir / "session.json", {}).get("pendingNotices"), "重要提醒未保存，重启可能丢失"
         important = self.last_notice
@@ -649,7 +824,8 @@ class Panel:
         assert self.last_notice is important, "重要结果被普通提醒覆盖"
         self.dismiss_notice()
         assert not self.pending_critical
-        result.update(resultReminderNeedsAcknowledgement=True, importantReminderNotOverwritten=True)
+        result.update(resultReminderNeedsAcknowledgement=True, importantReminderNotOverwritten=True,
+                      cardFailurePreemptsPublicForecast=True)
         if self.smoke_report:
             self.smoke_report.parent.mkdir(parents=True, exist_ok=True)
             self.smoke_report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -666,9 +842,13 @@ class Panel:
         self.closed = True
         self.save_settings()
         self.save_session()
+        self.save_forecasts()
         if self.floating_window is not None:
             self.floating_window.close()
             self.floating_window = None
+        if self.forecast_window is not None:
+            self.forecast_window.close()
+            self.forecast_window = None
         self.root.destroy()
 
 

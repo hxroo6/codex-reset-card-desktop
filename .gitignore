@@ -17,6 +17,7 @@ config.json
 session.json
 settings.json
 reminders.json
+forecasts.json
 build/
 dist/
 .codex/

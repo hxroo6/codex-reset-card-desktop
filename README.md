@@ -24,6 +24,18 @@ codexrc service install
 - 成功、明确失败、此前已兑换和结果待确认分别提醒；重要结果需手动确认，不被普通提醒覆盖，未确认提醒可跨重启恢复。
 - 后台版本检查：无法确认兼容性时可以查看状态，但禁止修改延期计划。
 - 独立演示模式，不连接账号、不操作真实卡片。
+- 多站公开活动预告：逐站显示证据可信度、预计时间、采集状态及错误；共同原帖去重。
+- 单独的重置预告悬浮窗，显示与置顶可开关；明确的未来时间支持提前 1 小时、10 分钟、2 分钟和到点提醒。
+
+## 公开重置预告
+
+内置 [Codex Reset Radar](https://codex-reset.com/)、[Codex Resets](https://codex-resets.com/)、[WhenReset](https://whenreset.app/) 与 [Skill2Web](https://reset.skill2web.com/zh/codex/) 四个公开来源。默认每 15 分钟检查，单站异常退避并显示缓存状态，可关闭采集与提醒，也可单独关闭预告悬浮窗。
+
+在“公开重置预告”查看各站的证据可信度、原始公告、发布时间和预计重置时间。可信度为证据等级，**不是到账概率**；第三方转述未独立核验的原帖最高为中。多个站引用同一原帖仍是一份证据。
+
+只有新鲜且时间明确的预告参与倒计时。截止时间标为“预告截止”，到点只代表预告时间已到，仍需等待完成证据。发布时间、重置卡有效期、历史平均间隔不会被当成下一次重置时间；“即将到来”、有时区歧义或已过期的信息会显示原因。
+
+公共活动不代表个人账户已恢复，也不改变原自动使用卡片的计划。最小化面板可继续采集和提醒，关闭面板后暂停。网站结构变化或被限制访问会显示采集失败，保留旧数据并标明陈旧，不静默显示“没有活动”。
 
 下图均为虚构演示数据：
 
@@ -31,6 +43,9 @@ codexrc service install
 
 ![倒计时](docs/images/floating-countdown.png)
 ![失败结果提醒](docs/images/result-notification.png)
+
+![公开活动预告与来源证据](docs/images/public-forecasts.png)
+![预告截止倒计时](docs/images/forecast-countdown.png)
 
 ## 运行条件与边界
 
@@ -81,5 +96,7 @@ Windows GitHub Actions 会运行测试、演示窗口冒烟、构建 EXE，并�
 ## 数据与许可证
 
 本地设置、脱敏快照、提醒去重与未确认结果保存在 `%LOCALAPPDATA%\CodexResetCardPanel`。本面板不读取登录 token；在线请求由原 CLI 完成。不要公开提交本机日志、完整状态、登录文件或真实截图。
+
+公开预告采集独立访问上述公开 HTTPS 来源，复用系统代理，不发送个人卡片或账户数据、不读取浏览器登录。预告缓存与提醒去重保存在本地 `forecasts.json`。
 
 采用 MIT；上游来源与版权见 [NOTICE](NOTICE)、[上游 MIT 许可证](LICENSES/codex-reset-card.MIT)。这是社区工具，与 OpenAI 无隶属关系。更多见 [SECURITY.md](SECURITY.md)。
