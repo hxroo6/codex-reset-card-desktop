@@ -36,6 +36,25 @@ ORANGE = "#A95C08"
 RED = "#AC3544"
 
 
+def forecast_health_change(sources, previous_failed=()):
+    """Report source failures/recoveries once, without displaying error popups."""
+    sources = [source for source in sources if isinstance(source, dict) and source.get("id")]
+    failed = {source["id"] for source in sources if source.get("error")}
+    previous_failed = set(previous_failed)
+    if failed == previous_failed:
+        return failed, None
+    updated = [source for source in sources if source.get("lastSuccessAt") and not source.get("error")]
+    recovered = [source for source in updated if source["id"] in previous_failed]
+    message = f"{len(sources)} 个公开来源：{len(updated)} 个可读取，{len(failed)} 个采集失败。"
+    if failed:
+        message += "全部来源暂时无法采集；" if len(failed) == len(sources) else "部分来源暂时无法采集；"
+        message += "保留上次成功缓存，失败来源按各自退避时间重试。"
+    if recovered:
+        message += f"已恢复 {len(recovered)} 个：" + "、".join(safe_error(source.get("name") or source["id"]) for source in recovered) + "。"
+    title = "公开预告采集恢复" if recovered else "公开预告采集异常"
+    return failed, (title, message)
+
+
 class Panel:
     def __init__(self, root, demo=False, smoke=False, minimized=False, smoke_report=None):
         self.root, self.demo = root, demo
@@ -56,6 +75,8 @@ class Panel:
         self.forecast_results = queue.Queue()
         self.forecast_busy = False
         self.forecast_store = ForecastStore(load_json(self.data_dir / "forecasts.json", {}))
+        saved_failures = self.session.get("forecastFailedSources")
+        self.forecast_failed_sources = set(saved_failures) if isinstance(saved_failures, list) and all(isinstance(value, str) for value in saved_failures) else set()
         self.forecast_next = parse_time(self.session.get("forecastNext")) or utcnow()
         self.forecast_attempt = parse_time(self.session.get("forecastAttempt"))
         cached_sites = {source.get("id") for source in self.forecast_store.saved().get("sources", []) if isinstance(source, dict)}
@@ -202,7 +223,7 @@ class Panel:
         self.detail = tk.Label(body, text="", bg=BG, fg=MUTED, justify="left", anchor="w", font=("Microsoft YaHei UI", 9), wraplength=1060)
         self.detail.pack(fill="x", pady=(9, 8))
         self.forecast_section = ForecastSection(
-            body, self.request_forecasts, self.toggle_forecasts, self.open_forecast_url,
+            body, lambda: self.request_forecasts(manual=True), self.toggle_forecasts, self.open_forecast_url,
             self.forecast_enabled, self.forecast_floating_enabled, self.forecast_topmost)
         self.forecast_section.frame.pack(fill="x", pady=(4, 12))
         lower = tk.Frame(body, bg=WHITE, padx=14, pady=10)
@@ -303,11 +324,14 @@ class Panel:
         except OSError as exc:
             self.add_history("预告保存失败", safe_error(exc))
 
-    def request_forecasts(self):
+    def request_forecasts(self, manual=False):
         if self.forecast_busy:
             return
         now = utcnow()
         if self.forecast_attempt and (now - self.forecast_attempt).total_seconds() < 60:
+            if manual:
+                self.add_history("预告采集节流", "两次公开预告采集至少间隔 60 秒，请稍候；来源自身的 HTTP 访问限制仍会保留。")
+                self.save_session()
             return
         self.forecast_busy = True
         self.forecast_attempt = now
@@ -317,7 +341,7 @@ class Panel:
 
         def worker():
             try:
-                result = demo_forecasts() if self.demo else collect_forecasts(previous)
+                result = demo_forecasts() if self.demo else collect_forecasts(previous, manual=manual)
                 self.forecast_results.put((result, None))
             except Exception as exc:
                 self.forecast_results.put((None, safe_error(exc)))
@@ -335,6 +359,11 @@ class Panel:
         else:
             self.forecast_store.update(result)
             self.save_forecasts()
+            failed, note = forecast_health_change(self.forecast_store.saved().get("sources", []), self.forecast_failed_sources)
+            self.forecast_failed_sources = failed
+            if note:
+                self.add_history(*note)
+                self.save_session()
         self.render()
 
     def evaluate_forecast_reminders(self):
@@ -372,7 +401,8 @@ class Panel:
                  "nextLive": self.next_live.isoformat(), "autoBlocked": self.blocked, "failures": self.failures,
                  "history": self.history_entries[-100:], "pendingNotices": self.pending_critical}
         value.update(forecastNext=self.forecast_next.isoformat(),
-                     forecastAttempt=self.forecast_attempt.isoformat() if self.forecast_attempt else None)
+                     forecastAttempt=self.forecast_attempt.isoformat() if self.forecast_attempt else None,
+                     forecastFailedSources=sorted(self.forecast_failed_sources))
         try:
             save_json(self.data_dir / "session.json", value)
             save_json(self.data_dir / "reminders.json", self.reminders.state)

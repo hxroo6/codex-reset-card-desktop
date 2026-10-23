@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from forecast_widgets import confidence_view, forecast_event_view, forecast_source_view
+from forecast_widgets import confidence_view, forecast_event_view, forecast_health_counts, forecast_source_view
 
 NOW = datetime(2026, 10, 23, 8, 0, tzinfo=timezone.utc)
 
@@ -137,6 +137,22 @@ class ForecastViewTests(unittest.TestCase):
     def test_source_error_and_old_cache_are_explicit(self):
         self.assertIn("采集失败", forecast_source_view({"error": "网络不可用"}, [], NOW)["state"])
         self.assertIn("旧缓存", forecast_source_view({"stale": True}, [], NOW)["state"])
+
+    def test_source_failure_shows_retry_in_beijing_and_redacts_detail(self):
+        view = forecast_source_view({"error": "TLS 连接中断", "nextAttemptAt": (NOW + timedelta(minutes=15)).isoformat(),
+                                     "errorDetail": "https://username:private@proxy.invalid/ Bearer sensitive password=secret token=private"}, [], NOW)
+        self.assertIn("下次重试 2026-10-23 16:15:00 北京时间", view["state"])
+        self.assertIn("下次重试", view["retry"])
+        for secret in ("username", "private", "sensitive", "password=secret"):
+            self.assertNotIn(secret, view["errorDetail"])
+        self.assertIn("已隐藏", view["errorDetail"])
+
+    def test_health_counts_distinguish_failed_retrying_stale_and_updated(self):
+        sources = [{"lastSuccessAt": NOW.isoformat()},
+                   {"lastSuccessAt": NOW.isoformat(), "stale": True},
+                   {"error": "TLS 中断", "nextAttemptAt": (NOW + timedelta(minutes=5)).isoformat()},
+                   {"error": "连接失败", "nextAttemptAt": (NOW - timedelta(seconds=1)).isoformat()}, {}]
+        self.assertEqual(forecast_health_counts(sources, NOW), {"updated": 1, "failed": 2, "waiting": 1})
 
     def test_merged_event_keeps_count_but_does_not_assign_another_sites_time(self):
         source = {"id": "second", "name": "第二演示来源", "lastSuccessAt": NOW.isoformat()}

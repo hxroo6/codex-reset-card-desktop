@@ -80,6 +80,8 @@ class ForecastStore:
             rows.append({"id": key, "sourceId": key, "name": source.get("name", key), "sourceName": source.get("name", key),
                          "url": source.get("url", ""), "requestUrl": source.get("requestUrl", ""), "lastSuccessAt": source.get("lastSuccessAt"),
                          "fetchedAt": source.get("fetchedAt"), "nextAttemptAt": source.get("nextAttemptAt"), "error": source.get("error", ""),
+                         "failureKind": source.get("failureKind"), "httpStatus": source.get("httpStatus"),
+                         "errorDetail": source.get("errorDetail", ""), "lastManualAttemptAt": source.get("lastManualAttemptAt"),
                          "stale": stale, "confidence": confidence, "confidenceLabel": CONFIDENCE_LABELS[confidence], "count": len(events),
                          "status": "读取失败·缓存陈旧" if source.get("error") else "尚未采集" if not source.get("lastSuccessAt") else "缓存陈旧" if stale else "已更新",
                          "confidenceReason": confidence_reason,

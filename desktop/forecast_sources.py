@@ -610,17 +610,33 @@ def _fetch(source):
     return payload.decode("utf-8-sig", errors="strict")
 
 
-def _source_result(source, previous, now):
+def _manual_network_retry(previous, now):
+    """Retry a recovered transport on user request, never bypass server limits."""
+    code = previous.get("httpStatus")
+    if code is not None or previous.get("failureKind") == "http" or re.search(r"\bHTTP\s+\d{3}\b", previous.get("error", ""), re.I):
+        return False
+    network = previous.get("failureKind") in ("connection", "tls", "dns", "timeout")
+    legacy = previous.get("error", "").startswith(("公开来源连接失败", "公开来源请求超时"))
+    if not previous.get("error") or not (network or legacy):
+        return False
+    recent = [parse_time(previous.get(key)) for key in ("fetchedAt", "lastManualAttemptAt")]
+    return all(stamp is None or (now-stamp).total_seconds() >= 60 for stamp in recent)
+
+
+def _source_result(source, previous, now, manual=False):
     old = copy.deepcopy(previous) if isinstance(previous, dict) else {}
     result = {**old, **{k: source[k] for k in ("id", "name", "url", "requestUrl", "sourceGroup", "sourceGroupReason") if k in source}}
     next_attempt = parse_time(old.get("nextAttemptAt"))
-    if next_attempt and now < next_attempt:
+    if next_attempt and now < next_attempt and not (manual and _manual_network_retry(old, now)):
         return result
     result["fetchedAt"] = iso(now)
+    if manual:
+        result["lastManualAttemptAt"] = iso(now)
     try:
         payload = _fetch(source)
         events, meta = parse_source(source, payload, now=now)
-        result.update(events=events, lastSuccessAt=iso(now), error="", failures=0, nextAttemptAt=iso(now + timedelta(seconds=POLL_SECONDS)), **meta)
+        result.update(events=events, lastSuccessAt=iso(now), error="", errorDetail="", failureKind=None, httpStatus=None,
+                      failures=0, nextAttemptAt=iso(now + timedelta(seconds=POLL_SECONDS)), **meta)
     except Exception as error:
         # One failed source cannot delete its cached events or block the others.
         failures = min(8, int(old.get("failures", 0)) + 1)
@@ -640,20 +656,19 @@ def _source_result(source, previous, now):
                         delay = min(24 * 3600, max(delay, int((retry_at - now).total_seconds())))
                 except (TypeError, ValueError, OverflowError):
                     pass
+        from panel_logic import network_error_details
+        diagnostic = network_error_details(error)
         if code:
             message = f"HTTP {code}；已退避，保留上次成功缓存"
-        elif isinstance(error, (TimeoutError, socket.timeout)):
-            message = "公开来源请求超时；保留上次成功缓存"
-        elif isinstance(error, (json.JSONDecodeError, ET.ParseError, UnicodeError, ValueError)):
-            message = "来源格式无法解析或不安全；保留上次成功缓存"
         else:
-            message = "公开来源连接失败；保留上次成功缓存"
-        result.update(error=message, failures=failures, nextAttemptAt=iso(now + timedelta(seconds=delay)))
+            message = diagnostic["message"] + "；保留上次成功缓存"
+        result.update(error=message, errorDetail=diagnostic["detail"], failureKind=diagnostic["kind"], httpStatus=code,
+                      failures=failures, nextAttemptAt=iso(now + timedelta(seconds=delay)))
         result.setdefault("events", [])
     return result
 
 
-def collect_forecasts(previous=None, now=None):
+def collect_forecasts(previous=None, now=None, manual=False):
     now = now or utcnow()
     previous = previous if isinstance(previous, dict) else {}
     old_sources = previous.get("sources", [])
@@ -661,6 +676,6 @@ def collect_forecasts(previous=None, now=None):
     # Four workers bound concurrent requests; only the first page of each fixed
     # endpoint is read. Each endpoint has its own persistent polling budget.
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="public-forecast") as pool:
-        futures = [pool.submit(_source_result, s, old_sources.get(s["id"]), now) for s in SOURCES]
+        futures = [pool.submit(_source_result, s, old_sources.get(s["id"]), now, manual) for s in SOURCES]
         results = [future.result() for future in futures]
     return {"schema": 1, "fetchedAt": iso(now), "sources": results}

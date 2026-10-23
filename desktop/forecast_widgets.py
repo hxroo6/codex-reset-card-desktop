@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 import tkinter as tk
 from tkinter import ttk
 
 from floating_countdown import work_area
-from panel_logic import clock_text, parse_time, remaining_text, utcnow
+from panel_logic import clock_text, parse_time, remaining_text, safe_error, utcnow
 
 BG, NAVY, TEAL = "#F0F5F8", "#102C40", "#008A81"
 TEXT, MUTED, WHITE = "#16354B", "#526C7F", "#FFFFFF"
@@ -28,6 +29,21 @@ def _time(value):
 def _excerpt(value, limit):
     text = " ".join(_text(value, limit=5000).split())
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _error_detail(value):
+    text = safe_error(value) if value else ""
+    text = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1[已隐藏]@", text)
+    return re.sub(r"(?i)(password|passwd|secret|api_key|token)[\s\"']*[:=][\s\"']*[^\s\",;&]+", r"\1=[已隐藏]", text)
+
+
+def forecast_health_counts(sources, now=None):
+    now = _time(now) or utcnow()
+    sources = [source for source in sources if isinstance(source, dict)]
+    failed = [source for source in sources if source.get("error")]
+    waiting = sum(bool((retry := _time(source.get("nextAttemptAt"))) and retry > now) for source in failed)
+    updated = sum(bool(source.get("lastSuccessAt") and not source.get("error") and not source.get("stale")) for source in sources)
+    return {"updated": updated, "failed": len(failed), "waiting": waiting}
 
 
 def confidence_view(item):
@@ -160,10 +176,15 @@ def forecast_source_view(source=None, events=(), now=None):
     if source.get("timeText") and not (selected and not _time(selected.get("resetAt")) and _time(selected.get("estimateAt"))):
         time_text = _text(source["timeText"])
     last_at = _time(source.get("lastSuccessAt"))
-    error = _text(source.get("error"), limit=200)
+    error = _error_detail(source.get("error"))[:200]
+    retry_at = _time(source.get("nextAttemptAt"))
+    retry_text = ("下次重试 " + clock_text(retry_at) + " 北京时间") if error and retry_at else ""
+    error_detail = _error_detail(source.get("errorDetail"))
     stale = bool(source.get("stale"))
     if error:
         state = "采集失败 · " + error
+        if retry_text:
+            state += " · " + retry_text
     elif stale:
         state = "旧缓存 · 待重新采集"
     elif last_at:
@@ -175,7 +196,8 @@ def forecast_source_view(source=None, events=(), now=None):
     return {"name": name, "confidence": grade["label"], "reason": grade["reason"], "time": time_text,
             "timeReason": _text(source.get("timeReason")) or _text((selected or {}).get("timeReason")),
             "state": state, "last": clock_text(last_at) if last_at else "暂无成功采集",
-            "url": _text(source.get("url")), "stale": stale}
+            "url": _text(source.get("url")), "stale": stale,
+            "errorDetail": error_detail, "retry": retry_text}
 
 
 class ForecastSection:
@@ -295,8 +317,9 @@ class ForecastSection:
         self._sync(self.source_tree, source_rows)
         self._sync(self.event_tree, event_rows)
         ready = sum(1 for event in events if forecast_event_view(event, now)["canCountdown"])
+        health = forecast_health_counts(sources, now)
         paused = "采集与提醒已关闭 · " if not self.enabled_var.get() else ""
-        self.summary.configure(text=paused + f"{len(sources)} 个公开来源 · {len(events)} 条相关内容 · {ready} 条有明确未来时间。来源列表可滚动；发布时间与预告时间分别显示。")
+        self.summary.configure(text=paused + f"{len(sources)} 个公开来源 · 已更新 {health['updated']} / 采集失败 {health['failed']}（等待重试 {health['waiting']}） · {len(events)} 条相关内容 · {ready} 条有明确未来时间。来源列表可滚动；发布时间与预告时间分别显示。")
         self.refresh_button.configure(state="disabled" if busy else "normal", text="正在采集…" if busy else "采集公开预告")
         self._selected()
         self._source_selected()
@@ -327,6 +350,8 @@ class ForecastSection:
             detail = f"{view['name']} · {view['confidence']}：{view['reason']}\n{view['time']} · {view['state']}"
             if view.get("timeReason"):
                 detail += "\n时间依据：" + view["timeReason"]
+            if view.get("errorDetail"):
+                detail += "\n错误详情：" + view["errorDetail"]
             self.source_reason.configure(text=detail)
         else:
             self.source_reason.configure(text="尚无来源记录。采集后可逐站查看可信度依据及采集状态。")

@@ -6,9 +6,13 @@ import hashlib
 import json
 import os
 import re
+import socket
+import ssl
 import subprocess
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from xml.etree.ElementTree import ParseError
 
 BEIJING = timezone(timedelta(hours=8))
 UTC = timezone.utc
@@ -51,9 +55,68 @@ def remaining_text(seconds):
 
 def safe_error(value):
     text = str(value)
+    # Errors may echo a proxy/request URL. Never persist URL user information.
+    text = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s?#]*@", r"\1[已隐藏]@", text)
     text = re.sub(r"(?i)bearer\s+\S+", "Bearer [已隐藏]", text)
     text = re.sub(r'(?i)(access_token|refresh_token|id_token|authorization)[\s\"\']*[:=][\s\"\']*[^\s\",;]+', r"\1=[已隐藏]", text)
     return text[:600]
+
+
+def network_error_details(error):
+    """Classify a failure without treating transport errors as site downtime.
+
+    URLError wraps socket/TLS failures; the Go status command instead reports
+    them as text. Classification supports both while retaining only a bounded,
+    redacted detail. It performs no requests or proxy configuration changes.
+    """
+    chain = []
+    pending = [error]
+    while pending and len(chain) < 8:
+        current = pending.pop(0)
+        if any(current is item for item in chain):
+            continue
+        chain.append(current)
+        if isinstance(current, BaseException):
+            reason = getattr(current, "reason", None)
+            if reason is not None:
+                pending.append(reason)
+            cause = current.__cause__ or current.__context__
+            if cause is not None:
+                pending.append(cause)
+    text = " ".join(str(item) for item in chain)
+    detail = re.sub(r"\s+", " ", safe_error(error)).strip()[:240]
+    code = next((item.code for item in chain if isinstance(item, urllib.error.HTTPError)), None)
+    if code is None:
+        match = re.search(r"(?i)\b(?:HTTP(?:/[\d.]+)?[\s:=-]*|status(?:\s+code)?[\s:=-]+)([45]\d{2})\b", text)
+        if match:
+            code = int(match.group(1))
+    if code is not None:
+        message = ("需要验证身份" if code == 401 else "来源拒绝访问" if code == 403 else
+                   "请求受到限流" if code == 429 else "来源暂不可用" if code >= 500 else "请求失败")
+        return {"kind": "http", "code": code, "message": f"HTTP {code}，{message}", "detail": detail}
+    if any(isinstance(item, (TimeoutError, socket.timeout)) for item in chain):
+        kind = "timeout"
+    elif any(isinstance(item, ssl.SSLError) for item in chain):
+        kind = "tls"
+    elif any(isinstance(item, socket.gaierror) for item in chain):
+        kind = "dns"
+    elif any(isinstance(item, (ValueError, UnicodeError, ParseError)) for item in chain):
+        kind = "parse"
+    elif re.search(r"(?i)timed?\s*out|i/o timeout|client\.timeout|deadline exceeded", text):
+        kind = "timeout"
+    elif re.search(r"(?i)\b(?:EOF|SSL|TLS)\b|certificate verify failed", text):
+        kind = "tls"
+    elif re.search(r"(?i)no such host|name resolution|getaddrinfo|name or service not known|nodename nor servname", text):
+        kind = "dns"
+    elif (any(isinstance(item, (urllib.error.URLError, ConnectionError)) for item in chain)
+          or re.search(r"(?i)connection (?:refused|reset|aborted)|connectex|forcibly closed|remote end closed|network unreachable|no route to host", text)):
+        kind = "connection"
+    else:
+        kind = "unknown"
+    messages = {"timeout": "连接或读取超时", "tls": "加密连接中断或验证失败",
+                "dns": "域名解析失败", "connection": "网络或代理连接失败",
+                "parse": "来源数据格式无法解析", "unknown": "读取失败，原因待确认"}
+    return {"kind": kind, "code": None, "message": messages[kind], "detail": detail}
 
 
 def clean_status(value):
