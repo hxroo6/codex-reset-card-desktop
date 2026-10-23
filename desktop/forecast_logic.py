@@ -12,6 +12,22 @@ from forecast_sources import BEIJING, SOURCES, canonical_url, iso, parse_time, u
 STALE_AFTER_SECONDS = 2 * 3600
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}
 TIME_LABELS = {"exact": "预告时间", "deadline": "预告截止", "window": "时间窗口待核实", "unknown": "时间未明确", "estimate": "站点估算"}
+TRUST_INACTIVE = {"completed", "delivered", "cancelled", "withdrawn", "expired", "historical", "archived", "retracted", "recorded"}
+
+
+def _trust_candidate(row, now):
+    """An explicit user choice may use an estimate, never invent its time."""
+    if row.get("trustBlockedStatus") or row.get("status") in TRUST_INACTIVE:
+        return None, "此记录已完成、取消、到期或属于历史记录，不能开启手动倒计时"
+    times = [parse_time(row.get(key)) for key in ("resetAt", "estimateAt")]
+    candidate = next((stamp for stamp in times if stamp and stamp > now), None)
+    if candidate is None:
+        reason = "记录中的具体时间已过，不能开启手动倒计时" if any(times) else "没有具体时间，不能开启手动倒计时"
+        return None, reason
+    reason = "手动采信仅锁定所选时间，不提高可信度，也不代表个人账户已重置"
+    if row.get("stale"):
+        reason = "缓存陈旧；" + reason
+    return candidate, reason
 
 
 def _stale(source, now):
@@ -46,6 +62,9 @@ class ForecastStore:
                 merged["events"] = copy.deepcopy(previous["events"])
             old[source["id"]] = merged
         self.data.update(schema=1, fetchedAt=result.get("fetchedAt") or iso(now), sources=list(old.values()))
+        # Persist an explicit end/cancellation while it is fresh. A subsequent
+        # network failure must not silently resume a paused manual selection.
+        self.trusted_event(now)
 
     def saved(self):
         return copy.deepcopy(self.data)
@@ -147,17 +166,91 @@ class ForecastStore:
             row["timeText"] = reset.astimezone(BEIJING).strftime("%Y-%m-%d %H:%M:%S 北京时间") if reset else "时间待核实"
             row["label"] = row["timeLabel"]
             row["remainingSeconds"] = (reset - now).total_seconds() if reset else None
+            terminal = next((e.get("status") for _, e in current if e.get("status") in TRUST_INACTIVE), None)
+            row["trustBlockedStatus"] = terminal or (row.get("status") if row.get("status") in TRUST_INACTIVE else None)
+            candidate, reason = _trust_candidate(row, now)
+            trusted = self.data.get("trustedForecast")
+            row.update(canTrust=candidate is not None, trustReason=reason, manualCandidateAt=iso(candidate),
+                       manualTrusted=isinstance(trusted, dict) and trusted.get("groupId") == row["groupId"])
             rows.append(row)
         return sorted(rows, key=lambda r: (0 if r["canCountdown"] else 1, r.get("resetAt") if r["canCountdown"] else "", -(parse_time(r.get("publishedAt")) or now.replace(year=2000)).timestamp()))
 
+    def trust(self, group_id, now=None):
+        """Lock one displayed forecast's concrete time until explicitly changed."""
+        now = now or utcnow()
+        row = next((item for item in self.rows(now) if item["groupId"] == group_id), None)
+        if row is None:
+            raise ValueError("所选预告已不在列表中，请重新选择")
+        if not row["canTrust"]:
+            raise ValueError(row["trustReason"])
+        fields = ("id", "title", "url", "originalUrl", "publishedAt", "resetAt", "estimateAt", "timeKind",
+                  "eventKind", "status", "confidence", "confidenceLabel", "confidenceReason", "timeReason",
+                  "sourceName", "sourceNames", "sourceIds", "sources", "claimedTimeText")
+        snapshot = {key: copy.deepcopy(row[key]) for key in fields if key in row}
+        self.data["trustedForecast"] = {"groupId": group_id, "targetAt": row["manualCandidateAt"],
+                                        "selectedAt": iso(now), "event": snapshot}
+        return self.trusted_event(now)
+
+    def clear_trust(self):
+        self.data.pop("trustedForecast", None)
+
+    def trusted_event(self, now=None):
+        """Return a locked choice, including its ended/paused display state."""
+        now = now or utcnow()
+        trusted = self.data.get("trustedForecast")
+        if not isinstance(trusted, dict) or not isinstance(trusted.get("groupId"), str):
+            return None
+        target = parse_time(trusted.get("targetAt"))
+        if target is None or not isinstance(trusted.get("event"), dict):
+            return None
+        current = next((item for item in self.rows(now) if item["groupId"] == trusted["groupId"]), None)
+        terminal = current.get("trustBlockedStatus") if current is not None and not current["stale"] else None
+        if terminal and not trusted.get("pausedAt"):
+            trusted.update(pausedAt=iso(now), terminalStatus=terminal,
+                           pauseReason="来源明确报告活动已完成、取消或归入历史，手动倒计时已暂停")
+        paused = bool(trusted.get("pausedAt"))
+        ended = target <= now
+        event = copy.deepcopy(trusted["event"])
+        event.update(groupId=trusted["groupId"], manualTrusted=True, resetAt=iso(target), reset=target,
+                     selectedAt=trusted.get("selectedAt"), remainingSeconds=(target-now).total_seconds(),
+                     timeText=target.astimezone(BEIJING).strftime("%Y-%m-%d %H:%M:%S 北京时间"),
+                     canCountdown=not paused and not ended, trustEnded=ended, trustPaused=paused,
+                     stale=current["stale"] if current is not None else True,
+                     trustReason=trusted.get("pauseReason") if paused else "手动采信并锁定的时间；刷新不会自动改期")
+        if paused:
+            event["status"] = trusted.get("terminalStatus", "cancelled")
+        if event["stale"]:
+            event["trustReason"] += "；当前缓存陈旧，继续按用户锁定时间显示"
+        event["confidenceLabel"] = CONFIDENCE_LABELS.get(event.get("confidence"), "低")
+        return event
+
     def next_event(self, now=None):
+        trusted = self.trusted_event(now)
+        if trusted is not None:
+            return trusted
         return next((row for row in self.rows(now) if row["canCountdown"]), None)
 
     def reminders(self, now=None):
         now = now or utcnow()
         seen = self.data["seen"]
         notes = []
+        trusted = self.trusted_event(now)
+        if trusted is not None and not trusted["trustPaused"]:
+            remaining = trusted["remainingSeconds"]
+            base = "manual-forecast:" + trusted["groupId"] + ":" + trusted["resetAt"] + ":"
+            due = [threshold for threshold in (3600, 600, 120, 0) if remaining <= threshold]
+            unseen = [threshold for threshold in due if base + str(threshold) not in seen]
+            for threshold in due:
+                seen[base + str(threshold)] = iso(now)
+            if remaining >= -60 and unseen:
+                threshold = min(unseen)
+                label = {3600: "1 小时内", 600: "10 分钟内", 120: "2 分钟内", 0: "已到采信时间"}[threshold]
+                title = "手动采信预告到点" if threshold == 0 else "手动采信重置预告"
+                stale = "；当前缓存陈旧" if trusted["stale"] else ""
+                notes.append((title, f"{trusted.get('title', 'Codex 公开活动')} · {label}\n手动采信时间：{trusted['timeText']}\n来源：{trusted.get('sourceName', '未知来源')} · 原可信度{trusted['confidenceLabel']}{stale}。手动采信不代表个人账户已到账。"))
         for row in self.rows(now):
+            if trusted is not None and row["groupId"] == trusted["groupId"]:
+                continue  # One selected event must not produce two notifications.
             reset = row.get("reset")
             if (row["stale"] or reset is None or row.get("timeKind") not in ("exact", "deadline")
                     or row.get("confidence") not in ("medium", "high") or row.get("status") not in ("upcoming", "scheduled")

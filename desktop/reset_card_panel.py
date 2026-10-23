@@ -224,7 +224,8 @@ class Panel:
         self.detail.pack(fill="x", pady=(9, 8))
         self.forecast_section = ForecastSection(
             body, lambda: self.request_forecasts(manual=True), self.toggle_forecasts, self.open_forecast_url,
-            self.forecast_enabled, self.forecast_floating_enabled, self.forecast_topmost)
+            self.forecast_enabled, self.forecast_floating_enabled, self.forecast_topmost,
+            on_trust=self.trust_forecast, on_clear_trust=self.clear_forecast_trust)
         self.forecast_section.frame.pack(fill="x", pady=(4, 12))
         lower = tk.Frame(body, bg=WHITE, padx=14, pady=10)
         lower.pack(fill="both", expand=True)
@@ -280,6 +281,27 @@ class Panel:
 
     def toggle_forecasts(self):
         self.save_settings()
+        self.render()
+
+    def trust_forecast(self, group_id):
+        try:
+            event = self.forecast_store.trust(group_id)
+        except ValueError as exc:
+            self.add_history("预告无法采信", safe_error(exc))
+        else:
+            self.forecast_enabled.set(True)
+            self.forecast_floating_enabled.set(True)
+            self.save_settings()
+            self.save_forecasts()
+            self.add_history("手动采信预告", f"{event.get('title', '公开活动')}；锁定预计时间：{event['timeText']}。")
+        self.save_session()
+        self.render()
+
+    def clear_forecast_trust(self):
+        self.forecast_store.clear_trust()
+        self.save_forecasts()
+        self.add_history("已取消手动采信", "预告悬浮窗恢复按来源证据与明确时间自动选择。")
+        self.save_session()
         self.render()
 
     def hide_forecast_floating(self):
@@ -346,7 +368,7 @@ class Panel:
             except Exception as exc:
                 self.forecast_results.put((None, safe_error(exc)))
         threading.Thread(target=worker, daemon=True).start()
-        self.forecast_section.render(self.forecast_store, now, busy=True)
+        self.forecast_section.render(self.forecast_store, now, busy=True, trusted=self.forecast_store.trusted_event(now))
 
     def drain_forecasts(self):
         try:
@@ -633,7 +655,8 @@ class Panel:
             self.refresh_button.configure(state="disabled" if left else "normal", text=f"在线刷新（{left}s）" if left else "在线只读刷新")
         live_note = "自动在线查询暂停" if self.blocked else "在线自动查询已关闭" if not self.auto_live.get() else f"下次在线查询 {clock_text(self.next_live)}"
         self.footer.configure(text=f"提醒：到期前 24 小时 / 1 小时 / 10 分钟、使用结果、服务异常。最小化后仍提醒，关闭面板后提醒停止，原服务继续运行。\n{live_note}  ·  每次推迟 2 分钟，最迟到期前 2 分钟；重要结果需手动确认。")
-        self.forecast_section.render(self.forecast_store, now, busy=self.forecast_busy)
+        self.forecast_section.render(self.forecast_store, now, busy=self.forecast_busy,
+                                     trusted=self.forecast_store.trusted_event(now))
         self.update_floating(now)
 
     def add_history(self, title, text):
@@ -745,6 +768,7 @@ class Panel:
         assert "未公布" in self.forecast_window.value.cget("text"), "未知时间显示了虚假倒数"
         self.forecast_store = forecast_before
         self.update_floating()
+        self.smoke_forecast_trust()
         assert self.forecast_window.window.attributes("-topmost"), "预告悬浮窗置顶未生效"
         self.forecast_section.topmost_switch.invoke()
         assert not self.forecast_window.window.attributes("-topmost"), "预告取消置顶未生效"
@@ -783,6 +807,35 @@ class Panel:
         self.smoke_postpone_count = 0
         self.smoke_postpone_deadline = time.monotonic() + 15
         self.root.after(100, self.smoke_postpone)
+
+    def smoke_forecast_trust(self):
+        # A deliberately uncertain fixture exercises explicit user choice;
+        # only the demo cache is touched, never actual forecasts or accounts.
+        original = self.forecast_store
+        fixture = demo_forecasts()
+        fixture["sources"][1]["events"][0].update(estimateAt=(utcnow() + timedelta(minutes=11)).isoformat())
+        self.forecast_store = ForecastStore(fixture)
+        self.render()
+        candidate = next(row for row in self.forecast_store.rows() if "demo-community" in row["sourceIds"])
+        assert candidate["canTrust"] and not candidate["canCountdown"], "估算时间未保留手动选择入口"
+        selected = next(key for key, row in self.forecast_section._events.items() if row.get("groupId") == candidate["groupId"])
+        self.forecast_section.event_tree.selection_set(selected)
+        self.forecast_section._selected()
+        assert self.forecast_section.trust_button.cget("state") == "normal", "未启用采信按钮"
+        self.forecast_section.trust_button.invoke()
+        self.root.update_idletasks()
+        trusted = self.forecast_store.next_event()
+        assert trusted["manualTrusted"] and trusted["confidence"] == "low", "手动采信更改了证据等级"
+        assert "手动采信" in self.forecast_window.label.cget("text"), "浮窗未标明手动采信"
+        assert self.forecast_window.value.cget("text") not in ("暂无准确预告", "未公布准确时间"), "采信后未倒数"
+        reloaded = ForecastStore(load_json(self.data_dir / "forecasts.json", {}))
+        assert reloaded.trusted_event()["resetAt"] == trusted["resetAt"], "手动采信未持久保存"
+        assert self.forecast_section.clear_trust_button.cget("state") == "normal", "无法取消手动采信"
+        self.forecast_section.clear_trust_button.invoke()
+        assert self.forecast_store.trusted_event() is None, "取消手动采信未生效"
+        self.forecast_store = original
+        self.save_forecasts()
+        self.render()
 
     def smoke_postpone(self):
         self.drain()
@@ -870,6 +923,8 @@ class Panel:
                       forecastTopmostTogglePersisted=True, forecastCollectionTogglePersisted=True,
                       forecastWindowsDoNotOverlap=True, shortScreenNoticeDoesNotOverlap=True)
         result.update(uncertainForecastVisibleWithoutCountdown=True, configuredPublicSources=len(SOURCES), requestedSiteAdaptersBundled=True)
+        result.update(manualForecastTrustStartsCountdown=True, manualForecastTrustPersisted=True,
+                      manualForecastTrustKeepsEvidenceGrade=True, manualForecastTrustCanBeCancelled=True)
         frozen = bool(getattr(sys, "frozen", False))
         bundle = Path(getattr(sys, "_MEIPASS", ".")).resolve()
         tcl_library = Path(str(self.root.tk.call("info", "library"))).resolve()
