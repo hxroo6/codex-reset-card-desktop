@@ -269,6 +269,11 @@ class Panel:
                     self.root, self.hide_forecast_floating, self.open_main_panel, self.forecast_topmost.get())
             self.forecast_window.set_topmost(self.forecast_topmost.get())
             event = self.forecast_store.next_event(now) if self.forecast_enabled.get() else None
+            if event is None and self.forecast_enabled.get():
+                # Keep an uncertain latest announcement visible, with no numeric
+                # countdown. The collector's canCountdown decision is retained.
+                event = next((row for row in self.forecast_store.rows(now)
+                              if row.get("status") in ("upcoming", "scheduled")), None)
             self.forecast_window.render(event, now, paused=not self.forecast_enabled.get())
             self.forecast_window.position(FloatingCountdown.HEIGHT + 12 if self.floating_window else 0)
         elif self.forecast_window is not None:
@@ -681,6 +686,18 @@ class Panel:
         assert len(self.forecast_section.source_tree.get_children()) >= 3, "未分别显示多个预告来源"
         assert self.forecast_store.next_event(), "演示未来预告未进入倒计时"
         assert self.forecast_window.window.winfo_viewable(), "预告悬浮窗未显示"
+        forecast_before = self.forecast_store
+        unknown = demo_forecasts()
+        for source in unknown["sources"]:
+            for event in source["events"]:
+                event.update(resetAt=None, timeKind="unknown", confidence="low")
+        self.forecast_store = ForecastStore(unknown)
+        self.update_floating()
+        assert not self.forecast_store.next_event()
+        assert "演示" in self.forecast_window.title.cget("text"), "未知时间预告未显示原公告"
+        assert "未公布" in self.forecast_window.value.cget("text"), "未知时间显示了虚假倒数"
+        self.forecast_store = forecast_before
+        self.update_floating()
         assert self.forecast_window.window.attributes("-topmost"), "预告悬浮窗置顶未生效"
         self.forecast_section.topmost_switch.invoke()
         assert not self.forecast_window.window.attributes("-topmost"), "预告取消置顶未生效"
@@ -805,6 +822,7 @@ class Panel:
                       forecastCountdownVisibleWhileMinimized=True, forecastTogglePersisted=True,
                       forecastTopmostTogglePersisted=True, forecastCollectionTogglePersisted=True,
                       forecastWindowsDoNotOverlap=True, shortScreenNoticeDoesNotOverlap=True)
+        result.update(uncertainForecastVisibleWithoutCountdown=True)
         frozen = bool(getattr(sys, "frozen", False))
         bundle = Path(getattr(sys, "_MEIPASS", ".")).resolve()
         tcl_library = Path(str(self.root.tk.call("info", "library"))).resolve()

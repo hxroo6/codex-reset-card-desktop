@@ -88,6 +88,8 @@ def forecast_event_view(event=None, now=None):
             result.update(countdown="时间待确认", status="尚不符合倒计时条件，请核对来源")
     elif kind == "estimate" and reset_at:
         result.update(status="来源仅给出估计；不作为准确时间倒计时")
+    elif not reset_at and event.get("timeReason"):
+        result.update(status=_text(event.get("timeReason"), limit=58) + "；不代表实际到账")
     status = _text(event.get("status")).lower()
     # An explicit collector decision is authoritative. The fallback only accepts
     # a clearly typed exact/deadline time, not a publication date or guess.
