@@ -29,7 +29,7 @@ codexrc service install
 
 ## 公开重置预告
 
-内置 **8 个**公开公告与历史来源：
+内置 **12 个**公开公告与历史来源：
 
 | 来源 | 采集入口与用途 |
 | --- | --- |
@@ -41,10 +41,16 @@ codexrc service install
 | [Codex Reset App](https://codex-reset.app/) | 公开网页预告与活动 |
 | [Tibo Watch](https://tibo.watch/) | 公告、预告与回复线索 API |
 | [When Next Reset](https://whennextreset.com/) | RSS 历史与发卡记录补充 |
+| [CodexClock](https://codexclock.com/) | 静态原帖与历史 JSON；按文件数据更新时间标明陈旧 |
+| [WhenReset 中国](https://whenreset.com.cn/) | 公开预告 API，区分原帖、社区观察和模型窗口 |
+| [WhenReset UK](https://whenreset.uk/) | 公开雷达 API，未审核候选不生成准确倒数 |
+| [AI Resets](https://ai-resets.com/) | 公开中文网页预告与历史，不访问其受限 API |
 
 默认每 15 分钟检查，单站异常退避并显示缓存状态，可关闭采集与提醒，也可单独关闭预告悬浮窗。来源列表可滚动。升级后自动加入新增站点，保留原缓存和提醒去重记录。
 
 部分站点共用 Codex Resets 等上游，逐站详情会说明采集链路，不把转载数量当作独立证据。历史补充源没有明确预告时不会生成未来倒计时。
+
+网站标出的概率、建议时间或“已确认”标签不会直接升级为本程序的准确预告。原文有时区歧义时只展示站点预计时间并标待核实；页面记录时间也不冒充原帖发布时间。
 
 在“公开重置预告”查看各站的证据可信度、原始公告、发布时间和预计重置时间。可信度为证据等级，**不是到账概率**；第三方转述未独立核验的原帖最高为中。多个站引用同一原帖仍是一份证据。
 

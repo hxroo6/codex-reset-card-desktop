@@ -83,7 +83,7 @@ class MoreForecastSourceTests(unittest.TestCase):
         return parse_source(source(adapter), payload, now=NOW)
 
     def test_four_new_sites_have_distinct_https_hosts_and_dependency_labels(self):
-        additions = SOURCES[4:]
+        additions = SOURCES[4:8]
         self.assertEqual(len(additions), 4)
         self.assertEqual(len({s["requestUrl"].split("/")[2] for s in additions}), 4)
         self.assertTrue(all(s.get("sourceGroupReason") for s in additions))

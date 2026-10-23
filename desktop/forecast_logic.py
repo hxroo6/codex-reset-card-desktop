@@ -75,6 +75,8 @@ class ForecastStore:
             confidence_reason = site_event.get("confidenceReason") or "社区网站转述，未直接核实官方原帖；相同原帖的镜像不增加可信度"
             if source.get("sourceGroupReason"):
                 confidence_reason += "；采集链路：" + source["sourceGroupReason"]
+            if source.get("freshnessNote"):
+                confidence_reason += "；" + source["freshnessNote"]
             rows.append({"id": key, "sourceId": key, "name": source.get("name", key), "sourceName": source.get("name", key),
                          "url": source.get("url", ""), "requestUrl": source.get("requestUrl", ""), "lastSuccessAt": source.get("lastSuccessAt"),
                          "fetchedAt": source.get("fetchedAt"), "nextAttemptAt": source.get("nextAttemptAt"), "error": source.get("error", ""),

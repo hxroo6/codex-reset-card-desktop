@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.2.2
+
+- 加入用户指定的 CodexClock、WhenReset 中国、WhenReset UK 与 AI Resets，总计 12 站。
+- 新增 3 种公开 JSON 与 1 种公开网页适配，不执行远程脚本或访问网页受限 API。
+- 静态旧数据标陈旧；模型概率、候选建议时间、社区观察及中文页面时间不作为准确到账或预告证据。
+- 原帖与站点预计时间有冲突时暂停准确倒数；否定重置的原文不触发未来提醒。
+
 ## 0.2.1
 
 - 从 4 站扩至 8 站，新增 Codex Reset、Codex Reset App、Tibo Watch、When Next Reset。

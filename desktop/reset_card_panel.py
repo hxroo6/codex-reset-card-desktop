@@ -690,6 +690,16 @@ class Panel:
         self.forecast_section.render(ForecastStore())
         assert len(self.forecast_section.source_tree.get_children()) == len(SOURCES), "新增配置来源未全部列出"
         assert str(len(SOURCES)) + " 个公开来源" in self.forecast_section.summary.cget("text")
+        # Resolve lazy site adapters in the frozen build without network I/O.
+        from forecast_sources import parse_source
+        for site in SOURCES:
+            if site["adapter"] in ("codexclock", "whenreset-cn", "whenreset-uk", "ai-resets"):
+                try:
+                    parse_source(site, "{}")
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("站点适配器未拒绝无效结构")
         self.forecast_section.render(self.forecast_store)
         assert self.forecast_store.next_event(), "演示未来预告未进入倒计时"
         assert self.forecast_window.window.winfo_viewable(), "预告悬浮窗未显示"
@@ -829,7 +839,7 @@ class Panel:
                       forecastCountdownVisibleWhileMinimized=True, forecastTogglePersisted=True,
                       forecastTopmostTogglePersisted=True, forecastCollectionTogglePersisted=True,
                       forecastWindowsDoNotOverlap=True, shortScreenNoticeDoesNotOverlap=True)
-        result.update(uncertainForecastVisibleWithoutCountdown=True, configuredPublicSources=len(SOURCES))
+        result.update(uncertainForecastVisibleWithoutCountdown=True, configuredPublicSources=len(SOURCES), requestedSiteAdaptersBundled=True)
         frozen = bool(getattr(sys, "frozen", False))
         bundle = Path(getattr(sys, "_MEIPASS", ".")).resolve()
         tcl_library = Path(str(self.root.tk.call("info", "library"))).resolve()

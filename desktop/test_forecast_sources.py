@@ -117,7 +117,7 @@ class ForecastSourceTests(unittest.TestCase):
             parse_source(source("whenreset"), '{}')
 
     def test_all_sources_are_public_and_timeout_bounded(self):
-        self.assertEqual(len(SOURCES), 8)
+        self.assertEqual(len(SOURCES), 12)
         self.assertLessEqual(FETCH_TIMEOUT_SECONDS, 12)
         self.assertTrue(all(safe_url(s["requestUrl"]) for s in SOURCES))
 
@@ -140,7 +140,7 @@ class ForecastSourceTests(unittest.TestCase):
         with patch("forecast_sources._fetch") as fetch:
             result = collect_forecasts(previous, NOW)
         fetch.assert_not_called()
-        self.assertEqual(len(result["sources"]), 8)
+        self.assertEqual(len(result["sources"]), len(SOURCES))
 
     def test_429_retry_after_is_respected(self):
         from forecast_sources import _source_result

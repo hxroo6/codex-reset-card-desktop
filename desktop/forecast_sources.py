@@ -49,6 +49,18 @@ SOURCES = (
     {"id": "codex-reset-app", "name": "Codex Reset App", "url": "https://codex-reset.app/",
      "requestUrl": "https://codex-reset.app/", "adapter": "codex-reset-app",
      "sourceGroup": "codex-resets", "sourceGroupReason": "公开页面转述上游公告；主页推算时点不作为原文准确时间"},
+    {"id": "codexclock", "name": "CodexClock", "url": "https://codexclock.com/",
+     "requestUrl": "https://codexclock.com/assets/content.json", "adapter": "codexclock",
+     "sourceGroup": "public-post-archive", "sourceGroupReason": "静态整理的原帖与历史记录；以数据更新时间判断陈旧，不把历史模型概率当预告"},
+    {"id": "whenreset-cn", "name": "WhenReset 中国", "url": "https://whenreset.com.cn/",
+     "requestUrl": "https://whenreset.com.cn/api/prediction-v2", "adapter": "whenreset-cn",
+     "sourceGroup": "public-post-and-community", "sourceGroupReason": "公开原帖转述与社区观察；模型窗口、社区到账记录不算官方准确预告"},
+    {"id": "whenreset-uk", "name": "WhenReset UK", "url": "https://whenreset.uk/",
+     "requestUrl": "https://whenreset.uk/api/radar.json", "adapter": "whenreset-uk",
+     "sourceGroup": "public-post-and-reference", "sourceGroupReason": "原帖转述及公共参考源；未审核的候选信号和历史推算不构成准确预告"},
+    {"id": "ai-resets", "name": "AI Resets", "url": "https://ai-resets.com/",
+     "requestUrl": "https://ai-resets.com/", "adapter": "ai-resets",
+     "sourceGroup": "codex-resets", "sourceGroupReason": "公开中文网页转述；概率、翻译及页面记录时间未独立核实，不因转载增加可信度"},
 )
 
 
@@ -362,6 +374,9 @@ def parse_source(source, payload, now=None):
     """Adapt actual public endpoint schemas; malformed schemas fail visibly."""
     adapter = source["adapter"]
     now = now or utcnow()
+    if adapter in ("codexclock", "whenreset-cn", "whenreset-uk", "ai-resets"):
+        from forecast_extra_sites import parse_extra_site
+        return parse_extra_site(source, payload, now)
     if adapter == "codex-reset-app":
         return _parse_reset_app(source, payload, now)
     if adapter == "skill2web":
