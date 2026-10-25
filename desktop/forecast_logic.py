@@ -86,7 +86,10 @@ class ForecastStore:
                 upcoming = event.get("status") in ("upcoming", "scheduled")
                 if upcoming and reset and reset > now and event.get("timeKind") in ("exact", "deadline"):
                     return (0, reset.timestamp())
-                return (1 if upcoming else 2, -(parse_time(event.get("publishedAt")) or now.replace(year=2000)).timestamp())
+                candidate, _ = _trust_candidate(event, now)
+                if candidate:
+                    return (1, candidate.timestamp())
+                return (2 if upcoming else 3, -(parse_time(event.get("publishedAt")) or now.replace(year=2000)).timestamp())
             ordered = sorted(events, key=priority)
             site_event = ordered[0] if ordered else {}
             confidence = "medium" if site_event.get("confidence") in ("medium", "high") else "low"
@@ -169,8 +172,24 @@ class ForecastStore:
             terminal = next((e.get("status") for _, e in current if e.get("status") in TRUST_INACTIVE), None)
             row["trustBlockedStatus"] = terminal or (row.get("status") if row.get("status") in TRUST_INACTIVE else None)
             candidate, reason = _trust_candidate(row, now)
+            candidate_source = source
+            # A mirror with no time must not erase another mirror's concrete
+            # estimate of the same announcement. Keep the estimate only for an
+            # explicit user choice; automatic countdown decisions stay above.
+            if candidate is None and not row["trustBlockedStatus"] and len(times) <= 1:
+                for other_source, other_event in candidates:
+                    other_time, _ = _trust_candidate(other_event, now)
+                    if other_time is not None:
+                        row["estimateAt"] = iso(other_time)
+                        candidate, reason = _trust_candidate(row, now)
+                        candidate_source = other_source
+                        if other_event.get("confidence") == "low":
+                            row.update(confidence="low", confidenceLabel=CONFIDENCE_LABELS["low"])
+                        break
             trusted = self.data.get("trustedForecast")
             row.update(canTrust=candidate is not None, trustReason=reason, manualCandidateAt=iso(candidate),
+                       manualCandidateSourceId=candidate_source.get("id") if candidate else None,
+                       manualCandidateSourceName=candidate_source.get("name") if candidate else None,
                        manualTrusted=isinstance(trusted, dict) and trusted.get("groupId") == row["groupId"])
             rows.append(row)
         return sorted(rows, key=lambda r: (0 if r["canCountdown"] else 1, r.get("resetAt") if r["canCountdown"] else "", -(parse_time(r.get("publishedAt")) or now.replace(year=2000)).timestamp()))
@@ -185,7 +204,8 @@ class ForecastStore:
             raise ValueError(row["trustReason"])
         fields = ("id", "title", "url", "originalUrl", "publishedAt", "resetAt", "estimateAt", "timeKind",
                   "eventKind", "status", "confidence", "confidenceLabel", "confidenceReason", "timeReason",
-                  "sourceName", "sourceNames", "sourceIds", "sources", "claimedTimeText")
+                  "sourceName", "sourceNames", "sourceIds", "sources", "claimedTimeText",
+                  "manualCandidateSourceId", "manualCandidateSourceName")
         snapshot = {key: copy.deepcopy(row[key]) for key in fields if key in row}
         self.data["trustedForecast"] = {"groupId": group_id, "targetAt": row["manualCandidateAt"],
                                         "selectedAt": iso(now), "event": snapshot}

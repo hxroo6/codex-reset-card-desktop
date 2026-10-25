@@ -225,6 +225,8 @@ class ForecastSection:
         self.on_open_url = on_open_url
         self.on_trust, self.on_clear_trust = on_trust, on_clear_trust
         self.trusted_event = None
+        self._last_source_selection = None
+        self._source_empty_name = ""
         self.enabled_var = enabled_var
         self.frame = tk.Frame(parent, bg=WHITE, padx=14, pady=12, highlightbackground=BORDER, highlightthickness=1)
         header = tk.Frame(self.frame, bg=WHITE)
@@ -275,6 +277,9 @@ class ForecastSection:
         self.clear_trust_button = tk.Button(links, text="取消手动采信", command=self._clear_trust, state="disabled",
                                             bg=BG, fg=TEAL, relief="flat", font=("Microsoft YaHei UI", 9), padx=12, pady=5)
         self.clear_trust_button.pack(side="left")
+        self.trust_hint = tk.Label(self.frame, text="选择一条预告查看能否采信。", bg=WHITE, fg=MUTED,
+                                   font=("Microsoft YaHei UI", 9), justify="left", anchor="w", wraplength=900)
+        self.trust_hint.pack(fill="x", pady=(5, 0))
         self.trust_status = tk.Label(self.frame, text="当前手动采信：无", bg=WHITE, fg=ORANGE,
                                      font=("Microsoft YaHei UI", 9), justify="left", anchor="w", wraplength=900)
         self.trust_status.pack(fill="x", pady=(4, 0))
@@ -286,6 +291,7 @@ class ForecastSection:
         def fit_reasons(event):
             self.reason.configure(wraplength=max(250, event.width - 45))
             self.source_reason.configure(wraplength=max(250, event.width - 45))
+            self.trust_hint.configure(wraplength=max(250, event.width - 45))
             self.trust_status.configure(wraplength=max(250, event.width - 45))
         self.frame.bind("<Configure>", fit_reasons)
         self._events, self._sources, self._event_views, self._source_views = {}, {}, {}, {}
@@ -312,7 +318,7 @@ class ForecastSection:
         return [item for item in value if isinstance(item, dict)] if isinstance(value, (list, tuple)) else []
 
     @staticmethod
-    def _sync(tree, rows):
+    def _sync(tree, rows, auto_select=True):
         desired = {key for key, _ in rows}
         for key in tree.get_children():
             if key not in desired:
@@ -324,7 +330,7 @@ class ForecastSection:
                 tree.move(key, "", index)
             else:
                 tree.insert("", index, iid=key, values=values)
-        if rows and not tree.selection():
+        if rows and auto_select and not tree.selection():
             tree.selection_set(rows[0][0])
 
     def render(self, store, now=None, busy=False, trusted=None):
@@ -351,15 +357,20 @@ class ForecastSection:
             view = self._source_views[key] = forecast_source_view(source, events, now)
             source_rows.append((key, (view["name"], view["confidence"], view["time"], view["last"] + " · " + view["state"])))
         self._sync(self.source_tree, source_rows)
-        self._sync(self.event_tree, event_rows)
+        self._sync(self.event_tree, event_rows, auto_select=not bool(self._source_empty_name))
         ready = sum(1 for view in self._event_views.values() if view["canCountdown"])
+        trust_ready = sum(event.get("canTrust") is True for event in events)
         health = forecast_health_counts(sources, now)
         paused = "采集与提醒已关闭 · " if not self.enabled_var.get() else ""
-        self.summary.configure(text=paused + f"{len(sources)} 个公开来源 · 已更新 {health['updated']} / 采集失败 {health['failed']}（等待重试 {health['waiting']}） · {len(events)} 条相关内容 · {ready} 条可倒计时。来源列表可滚动；发布时间与预告时间分别显示。")
+        no_future = "当前没有带未来具体时间的可采信预告。" if not trust_ready else ""
+        self.summary.configure(text=paused + f"{len(sources)} 个公开来源 · 已更新 {health['updated']} / 采集失败 {health['failed']}（等待重试 {health['waiting']}） · {len(events)} 条相关内容 · {ready} 条可倒计时 · 可手动采信 {trust_ready} 条。" + no_future + "来源列表可滚动；选择网站会定位其相关预告。")
         self.refresh_button.configure(state="disabled" if busy else "normal", text="正在采集…" if busy else "采集公开预告")
         if self.trusted_event:
             trusted_view = forecast_event_view(self.trusted_event, now)
-            self.trust_status.configure(text="当前手动采信：" + _excerpt(trusted_view["title"], 70) + " · " + trusted_view["time"] + " · " + trusted_view["countdown"])
+            inactive = self.trusted_event.get("trustPaused") or self.trusted_event.get("trustEnded") or not trusted_view["canCountdown"]
+            suffix = "。可选中新的可采信预告替换，或取消手动采信后重新选择。" if inactive else ""
+            self.trust_status.configure(text="当前手动采信：" + _excerpt(trusted_view["title"], 70) + " · " + trusted_view["time"] + " · " + trusted_view["countdown"] + suffix,
+                                        fg=ORANGE if inactive else TEAL)
         else:
             self.trust_status.configure(text="当前手动采信：无。可选中一条带预计时间的预告进行采信；证据等级保持原样。")
         self.clear_trust_button.configure(state="normal" if self.trusted_event and callable(self.on_clear_trust) else "disabled")
@@ -371,10 +382,15 @@ class ForecastSection:
         view = self._event_views.get(selected[0]) if selected else None
         row = self._events.get(selected[0], {}) if selected else {}
         if not view:
-            self.reason.configure(text="暂无相关预告。没有明确时间时，预告悬浮窗不推测倒计时。")
+            source_name = getattr(self, "_source_empty_name", "")
+            message = (source_name + "暂无相关预告，请选择其他网站或下方预告。") if source_name else "暂无相关预告。没有明确时间时，预告悬浮窗不推测倒计时。"
+            self.reason.configure(text=message)
             self.open_event_button.configure(state="disabled")
             self.trust_button.configure(state="disabled")
+            self.trust_hint.configure(text=message, fg=MUTED)
             return
+        if event is not None:
+            self._source_empty_name = ""
         detail = f"{view['confidence']}：{view['reason']}\n原文发布时间：{view['published']}（北京时间）  ·  {view['time']}\n{view['status']}"
         if view.get("timeReason"):
             detail += "\n时间依据：" + view["timeReason"]
@@ -385,11 +401,19 @@ class ForecastSection:
         trust_reason = _text(row.get("trustReason"), "尚未提供可采信的预计时间，无法手动倒计时。")
         detail += "\n手动采信：" + trust_reason
         candidate_at = _time(row.get("manualCandidateAt"))
+        candidate_source = _text(row.get("manualCandidateSourceName"))
         if candidate_at:
             detail += " · 预计时间 " + clock_text(candidate_at) + " 北京时间"
+            if candidate_source:
+                detail += " · 时间来源：" + candidate_source
         self.reason.configure(text=detail)
         self.open_event_button.configure(state="normal" if view["url"] else "disabled")
-        self.trust_button.configure(state="normal" if row.get("canTrust") is True and row.get("groupId") and callable(self.on_trust) else "disabled")
+        permitted = row.get("canTrust") is True and row.get("groupId") and callable(self.on_trust)
+        self.trust_button.configure(state="normal" if permitted else "disabled")
+        hint = "可采信预计时间：" + clock_text(candidate_at) + " 北京时间" if permitted and candidate_at else "无法采信：" + trust_reason
+        if permitted and candidate_source:
+            hint += " · 来源：" + candidate_source
+        self.trust_hint.configure(text=hint, fg=TEAL if permitted else ORANGE)
 
     def _trust_selected(self):
         selected = self.event_tree.selection()
@@ -415,6 +439,37 @@ class ForecastSection:
             self.source_reason.configure(text=detail)
         else:
             self.source_reason.configure(text="尚无来源记录。采集后可逐站查看可信度依据及采集状态。")
+        selection = selected[0] if selected else None
+        changed = selection != getattr(self, "_last_source_selection", None)
+        self._last_source_selection = selection
+        # render() calls this without an event. Recording that selection also
+        # ignores queued events from _sync's programmatic first-row selection.
+        # Only a real source selection change should move the event selection.
+        if event is not None and changed:
+            source_id = _text(source.get("id") or source.get("sourceId"))
+            matching = []
+            for key, row in self._events.items():
+                ids = row.get("sourceIds", [])
+                matches = source_id and (_text(row.get("sourceId")) == source_id or
+                                          isinstance(ids, (list, tuple)) and source_id in ids)
+                if matches:
+                    published = _time(row.get("publishedAt"))
+                    priority = (row.get("canTrust") is not True,
+                                row.get("status") not in ("upcoming", "scheduled"),
+                                -(published.timestamp() if published else 0))
+                    matching.append((priority, key))
+            if matching:
+                self._source_empty_name = ""
+                key = min(matching)[1]
+                self.event_tree.selection_set(key)
+                self.event_tree.focus(key)
+                self.event_tree.see(key)
+            else:
+                self._source_empty_name = _text(source.get("name"), "所选网站")
+                current = self.event_tree.selection()
+                if current:
+                    self.event_tree.selection_remove(*current)
+            self._selected()
 
     def _open_event(self):
         selected = self.event_tree.selection()

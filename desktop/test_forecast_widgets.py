@@ -246,7 +246,7 @@ class ManualTrustControlsTests(unittest.TestCase):
         section.event_tree.selection.return_value = ("event:demo-reset",)
         section._events = {"event:demo-reset": event}
         section._event_views = {"event:demo-reset": forecast_event_view(event, NOW)}
-        section.reason, section.open_event_button, section.trust_button = Mock(), Mock(), Mock()
+        section.reason, section.open_event_button, section.trust_button, section.trust_hint = Mock(), Mock(), Mock(), Mock()
         section.on_trust, section.on_clear_trust = Mock(), Mock()
         section.trusted_event = None
         return section
@@ -259,6 +259,7 @@ class ManualTrustControlsTests(unittest.TestCase):
         section.trust_button.configure.assert_called_with(state="normal")
         self.assertIn("站点估算，可自行选择采信", section.reason.configure.call_args.kwargs["text"])
         self.assertIn("预计时间 2026-10-23 16:10:00", section.reason.configure.call_args.kwargs["text"])
+        self.assertIn("可采信预计时间：2026-10-23 16:10:00", section.trust_hint.configure.call_args.kwargs["text"])
         section._trust_selected()
         section.on_trust.assert_called_once_with("group-of-original-post")
         self.assertEqual(event["confidence"], "low")
@@ -268,6 +269,7 @@ class ManualTrustControlsTests(unittest.TestCase):
         section._selected()
         section.trust_button.configure.assert_called_with(state="disabled")
         self.assertIn("未公布任何可用预计时间", section.reason.configure.call_args.kwargs["text"])
+        self.assertIn("无法采信：未公布任何可用预计时间", section.trust_hint.configure.call_args.kwargs["text"])
         section._trust_selected()
         section.on_trust.assert_not_called()
 
@@ -287,6 +289,59 @@ class ManualTrustControlsTests(unittest.TestCase):
         section._trust_selected()
         section.on_trust.assert_not_called()
 
+    def test_candidate_time_identifies_the_mirror_that_reported_it(self):
+        event = sample(groupId="estimate-original", canTrust=True, manualCandidateAt=NOW.isoformat(),
+                       manualCandidateSourceName="提供时间的网站", trustReason="估计时间")
+        section = self.section(event)
+        section._selected()
+        self.assertIn("来源：提供时间的网站", section.trust_hint.configure.call_args.kwargs["text"])
+        self.assertIn("时间来源：提供时间的网站", section.reason.configure.call_args.kwargs["text"])
+
+    def source_section(self, events):
+        section = self.section(sample())
+        section._events = events
+        section._event_views = {key: forecast_event_view(row, NOW) for key, row in events.items()}
+        section.source_tree, section.open_source_button, section.source_reason = Mock(), Mock(), Mock()
+        section.source_tree.selection.return_value = ("source:b",)
+        section._sources = {"source:b": {"id": "b", "name": "网站 B"}}
+        section._source_views = {"source:b": forecast_source_view(section._sources["source:b"], [], NOW)}
+        section._last_source_selection = "source:a"
+        section._source_empty_name = ""
+        return section
+
+    def test_source_selection_locates_trustable_event_from_merged_sources(self):
+        section = self.source_section({
+            "event:unrelated": sample(sourceId="a", canTrust=True),
+            "event:newer-unknown": sample(sourceId="b", status="upcoming", canTrust=False, publishedAt=NOW.isoformat()),
+            "event:merged-estimate": sample(sourceId="a", sourceIds=["a", "b"], canTrust=True,
+                                             publishedAt=(NOW-timedelta(hours=1)).isoformat())})
+        section._source_selected(event=object())
+        section.event_tree.selection_set.assert_called_once_with("event:merged-estimate")
+        section.event_tree.see.assert_called_once_with("event:merged-estimate")
+
+    def test_source_selection_without_trustable_event_prefers_latest_upcoming(self):
+        section = self.source_section({
+            "event:completed": sample(sourceId="b", status="completed", canTrust=False, publishedAt=NOW.isoformat()),
+            "event:old": sample(sourceId="b", status="upcoming", canTrust=False, publishedAt=(NOW-timedelta(hours=2)).isoformat()),
+            "event:recent": sample(sourceId="b", status="upcoming", canTrust=False, publishedAt=(NOW-timedelta(hours=1)).isoformat())})
+        section._source_selected(event=object())
+        section.event_tree.selection_set.assert_called_once_with("event:recent")
+
+    def test_render_and_queued_source_selection_do_not_override_event_choice(self):
+        section = self.source_section({"event:estimate": sample(sourceId="b", canTrust=True)})
+        section._source_selected()  # render records the programmatic selection
+        section._source_selected(event=object())  # queued TreeviewSelect
+        section.event_tree.selection_set.assert_not_called()
+
+    def test_source_without_events_clears_unrelated_selection_and_explains(self):
+        section = self.source_section({"event:unrelated": sample(sourceId="a", canTrust=True)})
+        section.event_tree.selection.return_value = ("event:unrelated",)
+        section.event_tree.selection_remove.side_effect = lambda *keys: setattr(section.event_tree.selection, "return_value", ())
+        section._source_selected(event=object())
+        section.event_tree.selection_remove.assert_called_once_with("event:unrelated")
+        section.trust_button.configure.assert_called_with(state="disabled")
+        self.assertIn("网站 B暂无相关预告", section.trust_hint.configure.call_args.kwargs["text"])
+
 
 def run_tk_smoke():
     """Exercise actual widgets with demo data; never invokes network or CLI."""
@@ -296,14 +351,19 @@ def run_tk_smoke():
     class Store:
         def rows(self):
             return [sample(groupId="demo-exact", canTrust=True, trustReason="演示明确时间，可选择采信",
+                           sourceId="demo-source", sourceIds=["demo-source"],
                            manualCandidateAt=(NOW + timedelta(minutes=10)).isoformat()),
                     sample(id="demo-unknown", groupId="demo-estimate", title="演示时区待核实", resetAt=None,
+                           sourceId="demo-second", sourceIds=["demo-second"],
                            confidence="low", timeKind="window", canTrust=True, trustReason="演示估算，可自行选择采信",
+                           manualCandidateSourceName="演示来源 B",
                            manualCandidateAt=(NOW + timedelta(minutes=20)).isoformat(),
                            estimateAt=(NOW + timedelta(minutes=20)).isoformat(), timeReason="演示原帖时区歧义")]
 
         def source_rows(self):
-            return [{"id": "demo-source", "name": "演示来源", "url": "https://example.invalid/", "lastSuccessAt": NOW.isoformat()}]
+            return [{"id": "demo-source", "name": "演示来源", "url": "https://example.invalid/", "lastSuccessAt": NOW.isoformat()},
+                    {"id": "demo-second", "name": "演示来源 B", "url": "https://example.invalid/b", "lastSuccessAt": NOW.isoformat()},
+                    {"id": "demo-empty", "name": "演示空来源", "url": "https://example.invalid/empty", "lastSuccessAt": NOW.isoformat()}]
 
     root = tk.Tk()
     root.geometry("1100x750")
@@ -316,13 +376,33 @@ def run_tk_smoke():
     floating = ForecastFloating(root, lambda: None, lambda: None)
     try:
         root.update()
-        assert len(section.source_tree.get_children()) == 1
+        assert len(section.source_tree.get_children()) == 3
         assert len(section.event_tree.get_children()) == 2
         assert "原文发布时间" in section.reason.cget("text")
         assert "演示来源" in section.source_reason.cget("text")
         assert "来源估计" in section.event_tree.item("event:demo-unknown", "values")[1]
         section.open_event_button.invoke()
         assert opened == ["https://example.invalid/demo"]
+        assert "可手动采信 2 条" in section.summary.cget("text")
+        section.source_tree.selection_set("source:demo-second")
+        root.update()
+        assert section.event_tree.selection() == ("event:demo-unknown",), "选择网站没有定位该站预告"
+        assert "来源：演示来源 B" in section.trust_hint.cget("text")
+        section.event_tree.selection_set("event:demo-reset")
+        root.update()
+        section.render(Store(), NOW)
+        root.update()
+        assert section.event_tree.selection() == ("event:demo-reset",), "定时渲染覆盖了手动选择"
+        section.source_tree.selection_set("source:demo-empty")
+        root.update()
+        assert not section.event_tree.selection(), "没有相关预告的网站仍选中别站事件"
+        assert "演示空来源暂无相关预告" in section.trust_hint.cget("text")
+        section.render(Store(), NOW)
+        root.update()
+        assert not section.event_tree.selection(), "定时渲染重新选中了无关预告"
+        section.source_tree.selection_set("source:demo-source")
+        root.update()
+        assert section.event_tree.selection() == ("event:demo-reset",)
         section.topmost_switch.invoke()
         assert toggled == [True]
         section.render(Store(), NOW, busy=True)
@@ -356,6 +436,10 @@ def run_tk_smoke():
         assert "16:20:00" in section.trust_status.cget("text")
         assert "手动采信" in section.event_tree.item("event:demo-unknown", "values")[1]
         assert "16:20:00" in section.event_tree.item("event:demo-unknown", "values")[1]
+        section.render(Store(), NOW, trusted=dict(trusted, trustPaused=True, trustEnded=True, status="completed"))
+        assert "已暂停" in section.trust_status.cget("text")
+        assert "重新选择" in section.trust_status.cget("text")
+        section.render(Store(), NOW, trusted=trusted)
         floating.render(trusted, NOW)
         root.update()
         assert floating.value.cget("text") == "00:20:00"
@@ -368,10 +452,22 @@ def run_tk_smoke():
         section.render(Store(), NOW)
         assert section.clear_trust_button.cget("state") == "disabled"
         assert "当前手动采信：无" in section.trust_status.cget("text")
+        class NoTrustStore(Store):
+            def rows(self):
+                return [sample(groupId="unknown", resetAt=None, canTrust=False, trustReason="没有具体时间，不能开启手动倒计时")]
+        section.render(NoTrustStore(), NOW)
+        root.update()
+        assert "可手动采信 0 条" in section.summary.cget("text")
+        assert "当前没有带未来具体时间" in section.summary.cget("text")
+        assert section.trust_button.cget("state") == "disabled"
+        assert "没有具体时间" in section.trust_hint.cget("text")
         return {"forecastWidgetSmoke": "passed", "network": False, "realCardOperations": False,
-                "sourceRows": 1, "eventRows": 2, "separatePublicationTime": True, "floatingVisible": True,
+                "sourceRows": 3, "eventRows": 2, "separatePublicationTime": True, "floatingVisible": True,
                 "floatingOffset": 240, "noTimeHasNoCountdown": True, "topmostToggle": True,
-                "manualTrustSelection": True, "manualTrustCancel": True, "manualTrustKeepsEvidence": True}
+                "manualTrustSelection": True, "manualTrustCancel": True, "manualTrustKeepsEvidence": True,
+                "sourceSelectionLocatesEvent": True, "renderPreservesUserSelection": True,
+                "emptySourceHasNoUnrelatedSelection": True, "pausedChoiceExplained": True,
+                "zeroTrustableForecastsExplained": True}
     finally:
         floating.close()
         root.destroy()

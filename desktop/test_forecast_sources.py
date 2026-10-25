@@ -106,7 +106,7 @@ class ForecastSourceTests(unittest.TestCase):
 
     def test_rss_atom_support_and_unsafe_xml_rejected(self):
         feed = '<rss><channel><item><title>Codex will reset</title><description>before 2026-10-24T02:00:00Z</description><link>' + ORIGINAL + '</link><pubDate>Fri, 23 Oct 2026 05:00:00 GMT</pubDate></item></channel></rss>'
-        rows, _ = parse_rss({"id": "rss", "name": "RSS", "url": "https://example.com"}, feed)
+        rows, _ = parse_rss({"id": "rss", "name": "RSS", "url": "https://example.com"}, feed, now=NOW)
         self.assertEqual(rows[0]["timeKind"], "deadline")
         self.assertEqual(rows[0]["publishedAt"], "2026-10-23T05:00:00+00:00")
         with self.assertRaises(ValueError):

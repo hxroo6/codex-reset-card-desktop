@@ -60,6 +60,52 @@ class ForecastTrustTests(unittest.TestCase):
         store = ForecastStore(data(sample(estimateAt=(NOW+timedelta(minutes=3)).isoformat())))
         self.assertEqual(self.select(store)["resetAt"], sample()["resetAt"])
 
+    def test_untimed_mirror_cannot_hide_another_sites_future_estimate(self):
+        estimate = (NOW+timedelta(minutes=45)).isoformat()
+        untimed = data(sample(resetAt=None, timeKind="window", timeReason="时区歧义"))
+        timed = data(sample(resetAt=None, estimateAt=estimate, timeKind="window", timeReason="时区歧义"),
+                     id="demo-estimate-site", name="有估计时间的站点")["sources"][0]
+        for sources in ([untimed["sources"][0], timed], [timed, untimed["sources"][0]]):
+            with self.subTest(order=[source["id"] for source in sources]):
+                store = ForecastStore({"sources": sources})
+                merged = row(store)
+                self.assertTrue(merged["canTrust"])
+                self.assertEqual(merged["manualCandidateAt"], estimate)
+                self.assertEqual(merged["manualCandidateSourceId"], "demo-estimate-site")
+                self.assertEqual(merged["estimateAt"], estimate)
+                self.assertFalse(merged["canCountdown"])
+                self.assertIsNone(store.next_event(NOW))
+                chosen = self.select(store)
+                self.assertEqual(chosen["resetAt"], estimate)
+                self.assertEqual(chosen["confidence"], "low")
+                restored = ForecastStore(json.loads(json.dumps(store.saved())))
+                self.assertEqual(restored.trusted_event(NOW)["manualCandidateSourceId"], "demo-estimate-site")
+
+    def test_fresh_untimed_mirror_does_not_revive_a_stale_estimate(self):
+        original = data(sample(resetAt=None, timeKind="window"))
+        stale = data(sample(resetAt=None, estimateAt=(NOW+timedelta(hours=1)).isoformat()),
+                     id="old-estimate", lastSuccessAt=(NOW-timedelta(hours=3)).isoformat())["sources"][0]
+        original["sources"].append(stale)
+        self.assertFalse(row(ForecastStore(original))["canTrust"])
+
+    def test_future_estimate_cannot_override_a_current_completed_report(self):
+        original = data(sample(resetAt=None, status="completed"))
+        timed = data(sample(resetAt=None, estimateAt=(NOW+timedelta(hours=1)).isoformat()),
+                     id="estimate-mirror")["sources"][0]
+        original["sources"].append(timed)
+        store = ForecastStore(original)
+        self.assertFalse(row(store)["canTrust"])
+        with self.assertRaises(ValueError):
+            self.select(store)
+
+    def test_source_displays_a_future_estimate_before_a_newer_untimed_post(self):
+        estimate = (NOW+timedelta(minutes=45)).isoformat()
+        timed = sample(resetAt=None, estimateAt=estimate, timeKind="window", status="unknown")
+        newer = sample(id="newer-untimed", originalUrl="https://example.invalid/newer", resetAt=None,
+                       publishedAt=NOW.isoformat(), timeKind="unknown")
+        source = ForecastStore(data(timed, newer)).source_rows(NOW)[0]
+        self.assertEqual(source["estimateAt"], estimate)
+
     def test_future_estimate_is_usable_when_reported_reset_time_has_passed(self):
         estimate = (NOW+timedelta(minutes=3)).isoformat()
         store = ForecastStore(data(sample(-2, estimateAt=estimate)))
